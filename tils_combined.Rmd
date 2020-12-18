@@ -1,0 +1,779 @@
+---
+title: "Melanoma Sample Integration"
+author: "Kari Stromhaug and Giacomo Oliveira"
+date: "4/2/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Loading libraries and setting path
+```{r loading libraries, echo=FALSE, warning=FALSE, message=FALSE}
+library(dplyr)
+library(knitr)
+library(ggpubr)
+library(cowplot)
+library(Seurat)
+library(openxlsx)
+library(stringr)
+library(clustree)
+library(harmony)
+library(tidyr)
+library(ggplot2)
+
+setwd("~/Dropbox (Partners HealthCare)/Melanoma P2 Analysis/")
+source('gsea_functions.R')
+```
+
+
+```{r read in data}
+setwd("~/Dropbox (Partners HealthCare)/Melanoma P2 Analysis/")
+p2.tils = readRDS('patient2/R_output/Seurat_Objects/TILs.Res04.clustered.seurat.20200228.rds')
+p6.tils = readRDS('patient6/R_output/Seurat_Objects/TILs.clustered.seurat.20200306.rds')
+p11.tils = readRDS('patient11/R_output/Seurat_Objects/TILs.Res03.clustered.seurat.20200309.rds')
+p15.tils = readRDS('patient15/R_output/Seurat_Objects/TILs.Res05.clustered.seurat.20200302.rds')
+
+```
+
+```{r}
+tils.all <- merge(x = p2.tils, y = c(p6.tils, p11.tils, p15.tils), add.cell.ids = c("p2", "p6", 'p11', 'p15'), project = "Melanoma TCR TILs")
+
+tils.all.copy = tils.all
+```
+
+
+```{r}
+origs = tils.all@meta.data[,c('orig.ident', 'sample')]; origs$s = rownames(origs)
+require(tidyverse)
+news = origs %>% separate (s, sep='_', into=c('patient', 'barcode'))
+patient = news$patient; names(patient) = rownames(news)
+tils.all = AddMetaData(tils.all, metadata=patient, col.name='patient')
+
+unique(tils.all@meta.data[which(tils.all@meta.data$patient=='p2'), ]$dn.adt)
+
+head(tils.all@meta.data[which(tils.all@meta.data$patient=='p6'), c('patient', 'dn.adt', 'dp.adt', 'cd4.adt', 'cd8.adt') ])
+
+
+```
+
+
+```{r normalization}
+
+tils.all <- NormalizeData(tils.all, assay = "RNA", normalization.method = "LogNormalize", scale.factor = 1e6)
+```
+
+### Cluster without batch correction
+```{r clustering without batch correction} 
+
+tils.all <- tils.all %>% FindVariableFeatures(selection.method = "vst", nfeatures = 2000) %>% 
+  ScaleData()
+
+tils.all <- tils.all %>% RunPCA(features = VariableFeatures(tils.all), verbose=F)
+
+tils.all <- tils.all %>% RunUMAP(reduction = "pca", dims = 1:50) %>% 
+  FindNeighbors(dims = 1:50) %>%
+  FindClusters()
+
+DimPlot(tils.all, label=TRUE)
+
+origs = tils.all@meta.data[,c('orig.ident', 'sample')]; origs$s = rownames(origs)
+require(tidyverse)
+news = origs %>% separate(s, sep='_', into=c('patient', 'barcode'))
+patient = news$patient; names(patient) = rownames(news)
+tils.all = AddMetaData(tils.all, metadata=patient, col.name='patient')
+
+Idents(tils.all)=tils.all$patient
+DimPlot(tils.all)
+
+## Batch Plot
+Idents(tils.all) <- tils.all@meta.data$sample
+DimPlot(tils.all, reduction = "umap")
+
+```
+
+
+
+# Harmony
+
+#### Look at PCs
+```{r look at PCs}
+tils.harmony <- tils.all %>% NormalizeData(assay = "RNA", normalization.method = "LogNormalize", scale.factor = 1e6)
+tils.harmony <- tils.harmony %>% FindVariableFeatures(selection.method = "vst", nfeatures = 2000)
+tils.harmony <- tils.harmony %>% ScaleData()
+tils.harmony <- tils.harmony %>% RunPCA(features = VariableFeatures(tils.harmony), verbose = FALSE)
+
+## already has the patient there
+options(repr.plot.height = 5, repr.plot.width = 12)
+DimPlot(object = tils.harmony, dims=c(1,2), reduction = "pca", pt.size = .1, group.by = "patient", split.by='patient')
+DimPlot(object = tils.harmony, dims=c(1,2), reduction = "pca", pt.size = .1, group.by = "patient")
+DimPlot(object = tils.harmony, dims=c(2,3), reduction = "pca", pt.size = .1, group.by = "patient")
+
+VlnPlot(object = tils.harmony, features = "PC_1", group.by = "patient", pt.size = .1)
+# plot_grid(p1,p3)
+
+```
+
+
+#### Run Harmony
+```{r run harmony}
+library(harmony)
+options(repr.plot.height = 2.5, repr.plot.width = 6)
+tils.harmony <- tils.harmony %>% RunHarmony("patient", plot_convergence = TRUE)
+
+options(repr.plot.height = 5, repr.plot.width = 12)
+dp1 <- DimPlot(object = tils.harmony, reduction = "harmony", pt.size = .1, group.by = "patient")
+v1 <- VlnPlot(object = tils.harmony, features = "harmony_1", group.by = "patient", pt.size = .1)
+plot_grid(dp1, v1)
+DimPlot(object = tils.harmony, dims=c(1,2), reduction = "harmony", pt.size = .1, group.by = "patient", split.by='patient')
+
+```
+
+
+#### Cluster again
+```{r recluster}
+
+tils.harmony <- tils.harmony %>% 
+    RunUMAP(reduction = "harmony", dims=1:50) %>%
+    FindNeighbors(reduction = "harmony", dims = 1:50) %>% 
+    FindClusters(resolution = 0.5) %>% 
+    identity()
+
+DimPlot(tils.harmony, reduction='umap', label=TRUE)
+DimPlot(tils.harmony, reduction='umap', split.by='patient')
+
+```
+
+
+```{r read in tils.harmony}
+saveRDS(tils.harmony, '~/Dropbox (Partners HealthCare)/Melanoma P2 Analysis/tils_combined/tils.harmonized.20200403.rds')
+# tils.harmony = readRDS('~/Dropbox (Partners HealthCare)/Melanoma P2 Analysis/tils_combined/tils.harmonized.20200403.rds')
+```
+
+## Run UMAP on tils.harmony cells at different resolutions
+```{r res til, message=FALSE, warning=FALSE}
+res = c(0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65)#, 0.70)#, 0.75, 0.80)#, 0.85, 0.90)
+
+for (i in res) {
+  tils.harmony <- FindClusters(tils.harmony, resolution=i)
+  tils.harmony@meta.data[,paste0('clusters_', as.character(i))]<-tils.harmony$seurat_clusters
+}
+
+clustree(tils.harmony)
+
+```
+
+### Plotting different resolutions
+```{r plotting tils.harmony resolutions, message=FALSE, warning=FALSE}
+Idents(tils.harmony) <- tils.harmony$clusters_0.3
+d1 = DimPlot(tils.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.30")
+
+Idents(tils.harmony) <- tils.harmony$clusters_0.35
+d2 = DimPlot(tils.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.35")
+
+Idents(tils.harmony) <- tils.harmony$clusters_0.4
+d3 = DimPlot(tils.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.40")
+
+Idents(tils.harmony) <- tils.harmony$clusters_0.45
+d4 = DimPlot(tils.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.45")
+
+Idents(tils.harmony) <- tils.harmony$clusters_0.5
+d5 = DimPlot(tils.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.50")
+
+Idents(tils.harmony) <- tils.harmony$clusters_0.55
+d6 = DimPlot(tils.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.55")
+
+Idents(tils.harmony) <- tils.harmony$clusters_0.6
+d7 = DimPlot(tils.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.60")
+
+Idents(tils.harmony) <- tils.harmony$clusters_0.65
+d8 = DimPlot(tils.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.65")
+
+# Idents(tils.harmony) <- tils.harmony$clusters_0.7
+# d9 = DimPlot(tils.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.70")
+
+plot_grid(d1, d2, d3, d4)
+plot_grid(d5, d6, d7, d8)
+
+Idents(tils.harmony)<-tils.harmony$clusters_0.6
+tils.harmony$clusters<-tils.harmony$clusters_0.6
+
+```
+
+
+### Look at a few features
+```{r plotting various things}
+p1 = FeaturePlot(tils.harmony, features='cd4.adt')
+p2 = FeaturePlot(tils.harmony, features='cd8.adt')
+p3 = FeaturePlot(tils.harmony, features='dp.adt')
+p4 = FeaturePlot(tils.harmony, features='dn.adt')
+plot_grid(p1, p2, p3, p4)
+
+k1 = FeaturePlot(tils.harmony, features='CD19.CITEseq.norm', min.cutoff = 1)
+k2 = FeaturePlot(tils.harmony, features='CD3.CITEseq.norm', min.cutoff = 1)
+k3 = FeaturePlot(tils.harmony, features='CD11b.CITEseq.norm', min.cutoff = 1)
+plot_grid(k1, k2, k3)
+FeaturePlot(tils.harmony, feature = "FOXP3")
+
+```
+
+
+### Renaming Clonotypes
+```{r}
+meta = tils.harmony@meta.data
+are.clones = rownames(meta[!is.na(meta$til.clonotype.family) | !is.na(meta$til.pre.clonotype.family) | !is.na(meta$til.rel.clonotype.family), ]); length(are.clones)
+are.traced = rownames(meta[!is.na(meta$TCR.Clone) & meta$TCR.Clone!=0, ]); length(are.traced)
+
+# DimPlot(tils.harmony, cells.highlight=are.traced)
+# DimPlot(tils.harmony, cells.highlight=are.traced, split.by='patient')
+
+meta$patient.tcf = paste0(meta$patient, '.', meta$til.clonotype.family)
+meta$patient.tcf = ifelse(meta$patient.tcf %in% c('p6.NA', 'p2.NA', 'p11.NA', 'p15.NA'), NA, meta$patient.tcf)
+meta$patient.pre.tcf = paste0(meta$patient, '.', meta$til.pre.clonotype.family)
+meta$patient.pre.tcf = ifelse(meta$patient.pre.tcf %in% c('p6.NA', 'p2.NA', 'p11.NA', 'p15.NA'), NA, meta$patient.pre.tcf)
+meta$patient.rel.tcf = paste0(meta$patient, '.', meta$til.rel.clonotype.family)
+meta$patient.rel.tcf = ifelse(meta$patient.rel.tcf %in% c('p6.NA', 'p2.NA', 'p11.NA', 'p15.NA'), NA, meta$patient.rel.tcf)
+
+patient.tcf.freqs = meta %>% subset(!is.na(patient.tcf)) %>% group_by(patient.tcf) %>% tally(name='tcf.counts'); dim(patient.tcf.freqs)
+patient.pre.tcf.freqs = meta %>% subset(!is.na(patient.pre.tcf)) %>% group_by(patient.pre.tcf) %>% tally(name='tcf.pre.counts'); dim(patient.pre.tcf.freqs)
+patient.rel.tcf.freqs = meta %>% subset(!is.na(patient.rel.tcf)) %>% group_by(patient.rel.tcf) %>% tally(name='tcf.rel.counts'); dim(patient.rel.tcf.freqs)
+
+dim(meta); head(rownames(meta))
+meta$cell.barcode = rownames(meta)
+# meta = m
+meta = merge(meta, patient.tcf.freqs, by=c('patient.tcf'), all.x=TRUE); dim(meta)
+meta = merge(meta, patient.pre.tcf.freqs, by=c('patient.pre.tcf'), all.x=TRUE); dim(meta)
+meta = merge(meta, patient.rel.tcf.freqs, by=c('patient.rel.tcf'), all.x=TRUE); dim(meta)
+meta[is.na(meta)]<-0
+
+
+##### create a new clonotype ID so that I don't have 3 columns
+meta$final.clonotype.family <- meta$patient.tcf
+meta$p11.fams = paste0(meta$patient.pre.tcf, '-', meta$patient.rel.tcf)
+meta$final.clonotype.family <- ifelse(meta$p11.fams!='0-0', meta$p11.fams, meta$final.clonotype.family)
+final.freqs = meta %>% subset(final.clonotype.family!=0) %>% group_by(final.clonotype.family) %>% tally(name='final.family.counts'); dim(final.freqs)
+meta = merge(meta, final.freqs, by='final.clonotype.family', all.x=TRUE); dim(meta)
+
+rownames(meta)<-meta$cell.barcode
+final.family = as.character(meta$final.clonotype.family); names(final.family)<-rownames(meta)
+final.family.counts = as.character(meta$final.family.counts); names(final.family.counts)<-rownames(meta)
+tils.harmony <- AddMetaData(tils.harmony, metadata=final.family, col.name='final.clonotype.family')
+tils.harmony <- AddMetaData(tils.harmony, metadata=final.family.counts, col.name='final.family.counts')
+       
+```
+
+
+#Save and reload the data
+```{r save data}
+saveRDS(tils.harmony, 'Seurat_Objects/tils.harmonized.20200403.rds')
+tils.harmony = readRDS('Seurat_Objects/tils.harmonized.20200403.rds')
+```
+
+# Find markers for each cluster
+```{r top til.cd8 markers}
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+til.markers <- FindAllMarkers(tils.harmony, min.pct = 0.25, logfc.threshold = log(2))
+top_10 = til.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC)
+
+top_10 = data.frame(top_10)
+show(top_10)
+write.table(top_10, 'harmonizedtils_top10genes_by_cluster.xlsx', sep=',')
+
+png("./Plots/harmonizedtils_top10_heatmap.png", width = 10, height = 7, units='in', res=500)
+DoHeatmap(tils.harmony, features = top_10$gene) + font("xy.text", size = 4)
+dev.off()
+
+
+top20 <- til.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_logFC)
+png("./plots/harmonizedtils_top20_heatmap.png", width = 10, height = 8, units='in', res=500)
+DoHeatmap(tils.harmony, features = top20$gene) + font("xy.text", size = 3) 
+dev.off()
+
+write.table(til.markers, file='harmonizedtils.markers.xlsx', sep=',')
+```
+
+
+#Get table clonotype distribution within clusters 
+```{r echo=FALSE, eval=FALSE}
+g.table = tils.harmony@meta.data[,c('orig.ident', 'sample', 'TCR.Clone', 'til.clonotype.family', 'final.clonotype.family', 'final.family.counts', 'til.pre.clonotype.family', 'til.rel.clonotype.family', 'final.clonotype.family', 'patient', 'clusters','seurat_clusters')]
+g.table$cell.barcode <- rownames(tils.harmony@meta.data)
+rownames(g.table) <- rownames(tils.harmony@meta.data)
+
+
+wb <- createWorkbook()
+name <- "TCR clones"
+addWorksheet(wb, name)
+writeData(wb, sheet = name, g.table)
+
+saveWorkbook(wb, file = 'tils.harmony.clonotype.cluster.spreadsheet.xlsx', overwrite = TRUE)
+
+```
+
+
+
+
+
+# Just CD8 TILS
+```{r subset out tils}
+
+cells <- rownames(tils.harmony@meta.data)[(tils.harmony@meta.data$cd8.adt==1 & tils.harmony@meta.data$cd4.adt==0)]; length(cells)
+tils.CD8.harmony <- subset(tils.harmony, cells = cells)
+tils.CD8.harmony <- NormalizeData(tils.CD8.harmony, assay = "RNA", normalization.method = "LogNormalize", scale.factor = 1e6)
+
+```
+### Check selection
+```{r plotting various things}
+p1 = FeaturePlot(tils.CD8.harmony, features='cd4.adt')
+p2 = FeaturePlot(tils.CD8.harmony, features='cd8.adt')
+p3 = FeaturePlot(tils.CD8.harmony, features='dp.adt')
+p4 = FeaturePlot(tils.CD8.harmony, features='dn.adt')
+plot_grid(p1, p2, p3, p4)
+DimPlot(tils.harmony, reduction='umap', label=TRUE)
+DimPlot(tils.CD8.harmony, reduction='umap', label=TRUE)
+
+
+```
+
+
+#### Cluster again
+```{r recluster}
+
+tils.CD8.harmony <- tils.CD8.harmony %>% 
+    RunUMAP(reduction = "harmony", dims=1:50) %>%
+    FindNeighbors(reduction = "harmony", dims = 1:50) %>% 
+    FindClusters(resolution = 0.6) %>% 
+    identity()
+
+DimPlot(tils.CD8.harmony, reduction='umap', label=TRUE)
+DimPlot(tils.CD8.harmony, reduction='umap', split.by='patient')
+```
+
+#Save and reload the data
+```{r save data}
+saveRDS(tils.CD8.harmony, 'Seurat_Objects/tils.CD8.harmonized.20200407.rds')
+tils.CD8.harmony = readRDS('Seurat_Objects/tils.CD8.harmonized.20200407.rds')
+saveRDS(tils.CD8.harmony, 'Seurat_Objects/tils.CD8.R0.6.harmonized.20200422.rds')
+tils.CD8.harmony = readRDS('Seurat_Objects/tils.CD8.R0.6.harmonized.20200422.rds')
+tils.CD8.harmony$clusters <- tils.CD8.harmony$seurat_clusters
+```
+
+
+## Run UMAP on tils.CD8.harmony cells at different resolutions
+```{r res til, message=FALSE, warning=FALSE}
+res = c(0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1)
+
+for (i in res) {
+  tils.CD8.harmony <- FindClusters(tils.CD8.harmony, resolution=i)
+  tils.CD8.harmony@meta.data[,paste0('clusters_', as.character(i))]<-tils.CD8.harmony$seurat_clusters
+}
+
+clustree(tils.CD8.harmony)
+
+```
+
+### Plotting different resolutions
+```{r plotting tils.harmony resolutions, message=FALSE, warning=FALSE}
+Idents(tils.CD8.harmony) <- tils.CD8.harmony$clusters_0.3
+d1 = DimPlot(tils.CD8.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.30")
+
+Idents(tils.CD8.harmony) <- tils.CD8.harmony$clusters_0.35
+d2 = DimPlot(tils.CD8.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.35")
+
+Idents(tils.CD8.harmony) <- tils.CD8.harmony$clusters_0.4
+d3 = DimPlot(tils.CD8.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.40")
+
+Idents(tils.CD8.harmony) <- tils.CD8.harmony$clusters_0.45
+d4 = DimPlot(tils.CD8.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.45")
+
+Idents(tils.CD8.harmony) <- tils.CD8.harmony$clusters_0.5
+d5 = DimPlot(tils.CD8.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.50")
+
+Idents(tils.CD8.harmony) <- tils.CD8.harmony$clusters_0.55
+d6 = DimPlot(tils.CD8.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.55")
+
+Idents(tils.CD8.harmony) <- tils.CD8.harmony$clusters_0.6
+d7 = DimPlot(tils.CD8.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.60")
+
+Idents(tils.CD8.harmony) <- tils.CD8.harmony$clusters_0.65
+d8 = DimPlot(tils.CD8.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.65")
+
+Idents(tils.CD8.harmony) <- tils.CD8.harmony$clusters_0.7
+d9 = DimPlot(tils.CD8.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.70")
+
+Idents(tils.CD8.harmony) <- tils.CD8.harmony$clusters_0.75
+d10 = DimPlot(tils.CD8.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.75")
+
+Idents(tils.CD8.harmony) <- tils.CD8.harmony$clusters_0.8
+d11 = DimPlot(tils.CD8.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.80")
+
+Idents(tils.CD8.harmony) <- tils.CD8.harmony$clusters_0.85
+d12 = DimPlot(tils.CD8.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.85")
+
+Idents(tils.CD8.harmony) <- tils.CD8.harmony$clusters_0.9
+d13 = DimPlot(tils.CD8.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.90")
+
+Idents(tils.CD8.harmony) <- tils.CD8.harmony$clusters_0.95
+d14 = DimPlot(tils.CD8.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.95")
+
+Idents(tils.CD8.harmony) <- tils.CD8.harmony$clusters_1
+d15 = DimPlot(tils.CD8.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 1")
+
+
+plot_grid(d1, d2)
+plot_grid(d3, d4)
+plot_grid(d5, d6)
+plot_grid(d7, d8)
+plot_grid(d9, d10)
+plot_grid(d11,d12)
+plot_grid(d15,d14, d15)
+
+```
+
+
+#### DGE testing in the tils.CD8.harmony population 
+```{r de testing tils.CD8.harmony, paged.print=TRUE,fig.height=3, fig.width=8}
+source('gsea_functions.R')
+all_genes <- de_test(tils.CD8.harmony, clusters = levels(tils.CD8.harmony$seurat_clusters))
+de_genes <- all_genes[all_genes$p_val_adj < 0.05]
+de_genes
+
+FindMarkers(tils.CD8.harmony, ident.1 = 1, ident.2 = 2, verbose = FALSE, logfc.threshold = 0, min.pct = 0)
+
+# Making plots for a few of the top genes
+plots <- de_violin(seurat = tils.CD8.harmony, de_genes = de_genes, row = c(1,2,3,9))
+CombinePlots(plots = plots, ncol = 4)
+```
+
+
+#### Perform GSEA on DE genes that are down-/upregulated in populations in each cluster
+```{r GSEA tils.CD8.harmony, warning=FALSE, paged.print=TRUE}
+
+
+m_df = msigdbr(species = "Homo sapiens", category = "H")
+m_list = m_df %>% split(x = .$gene_symbol, f = .$gs_name)
+
+apoptosis = read.delim('~/Downloads/geneset.txt', sep='\t')
+apoptosis_list = list('apoptosis'=apoptosis[2:nrow(apoptosis), 1])
+# GSEA for genes upregulated in cGVHD - within clusters
+gsea_res_tils.CD8.harmony <- gsea(all_genes, levels(tils.CD8.harmony$seurat_clusters), 'tils.CD8.harmony', apoptosis_list)
+
+# Printing some of the top gene sets (based on p.adj.)
+gsea_res_tils.CD8.harmony[gsea_res_tils.CD8.harmony$padj<0.05,]
+```
+
+GSEA tests were performed using "fgsea" (https://bioconductor.org/packages/devel/bioc/manuals/fgsea/man/fgsea.pdf). 
+Quick explanation of some columns in the output:
+
+1. NES – enrichment score normalized to mean enrichment of random samples of the same size (when negative; all genes in "leadingEdge" are *down*regulated in cGVHD compared to BM - and vice versa).
+
+2. nMoreExtreme – a number of times a random gene set had a more extreme enrichment score value.
+
+3. size – size of the pathway after removing genes not present in ‘names(stats)‘.
+
+4. leadingEdge – vector with indexes of leading edge genes that drive the enrichment. Can only be seen in Excel documents available in the Dropbox.
+
+
+
+# Find markers for each cluster
+```{r top til.cd8 markers}
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+til.CD8.markers <- FindAllMarkers(tils.CD8.harmony, min.pct = 0.25, logfc.threshold = log(2))
+top_10 = til.CD8.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC)
+
+top_10 = data.frame(top_10)
+show(top_10)
+write.table(top_10, 'harmonizedtilsCD8R06_top10genes_by_cluster.xlsx', sep=',')
+
+png("./Plots/harmonizedtilsCD8R06_top10_heatmap.png", width = 10, height = 7, units='in', res=500)
+DoHeatmap(tils.CD8.harmony, features = top_10$gene) + font("xy.text", size = 4)
+dev.off()
+
+
+top20 <- til.CD8.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_logFC)
+png("./Plots/harmonizedtilsCD8R06_top20_heatmap.png", width = 10, height = 8, units='in', res=500)
+DoHeatmap(tils.CD8.harmony, features = top20$gene) + font("xy.text", size = 3) 
+dev.off()
+
+write.table(til.CD8.markers, file='harmonizedtilsCD8R06.markers.xlsx', sep=',')
+```
+
+# Make Heatmaps with selected genes
+```{r top til.cd8 markers}
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+genes = c('CD4', 'CD8A','GZMK', 'GZMM', 'PRF1', 'IFNG', 'FASLG', 
+             'TNF', 'CD69', 'ICOS', 'TNFRSF9', 'HLA-DRA', 'ENTPD1')
+
+Idents(tils.CD8.harmony)<-tils.CD8.harmony$clusters
+png(" ## FILE ## ", width = 10, height = 7, units='in', res=500)
+DoHeatmap(tils.CD8.harmony, features = genes, slot='data', lines.width = 300) + #font("xy.text", size = 4) + 
+  #theme(legend.position = "none") +
+  scale_fill_gradientn(colors = c("blue", rep('chartreuse4', 20), rep('chartreuse3', 3), rep('chartreuse2', 3), rep('chartreuse1', 3), "yellow"))
+dev.off()
+
+
+```
+
+#Get table clonotype distribution within clusters 
+```{r echo=FALSE, eval=FALSE}
+g.table = tils.CD8.harmony@meta.data[,c('orig.ident', 'sample', 'TCR.Clone', 'til.clonotype.family', 'final.clonotype.family', 'final.family.counts', 'til.pre.clonotype.family', 'til.rel.clonotype.family', 'patient', 'clusters','seurat_clusters')]
+g.table$cell.barcode <- rownames(tils.CD8.harmony@meta.data)
+rownames(g.table) <- rownames(tils.CD8.harmony@meta.data)
+
+
+wb <- createWorkbook()
+name <- "TCR clones"
+addWorksheet(wb, name)
+writeData(wb, sheet = name, g.table)
+
+saveWorkbook(wb, file = 'tilsCD8.R06.harmony.clonotype.cluster.spreadsheet.xlsx', overwrite = TRUE)
+
+```
+
+score clusters
+```{r echo=FALSE, eval=FALSE}
+tils.CD8.harmony = readRDS('Seurat_Objects/tils.CD8.R0.6.harmonized.20200422.rds')
+
+t_eff = list(c('GNLY','NKG7','GZMH','CST7','KLRD1','GZMB','CCL5','PRF1','IFITM2','IFITM3','LITAF','HCST','ITGB2','GZMA','GPR56','GZMM','IFITM1','CD52','RAP1B','ZNF683'))
+t_em = list(c('GZMK','CCL4','CCL5','CST7','DUSP2','CD74','GZMA','NKG7','CCL3','CD8B','IFNG','CD8A','LOC100996809','HLA-A','CXCR4','GZMM','CLDND1','HLA-DRB4','DNAJB1','GZMH'))
+mitosis = list(c('HIST1H4C','TUBB','TUBA1B','HMGN2','GAPDH','H2AFZ','HMGB1','HMGB2','TPI1','PFN1','ACTB','PPIA','H2AFV','DUT','CALM2','GSTP1','HMGN1','SLC25A5','CRIP1','ENO1'))
+
+Idents(tils.CD8.harmony)<-tils.CD8.harmony$seurat_clusters
+cell_group = mitosis
+cell_group[[1]] = cell_group[[1]][cell_group[[1]] %in% rownames(tils.CD8.harmony)]
+tils.CD8.harmony <- AddModuleScore(tils.CD8.harmony, features=cell_group, name='mitosis_')
+unique(tils.CD8.harmony$seurat_clusters)
+unique(tils.CD8.harmony$clusters)
+ids = grep('Cluster[0-9]+', colnames(tils.CD8.harmony@meta.data))
+tils.CD8.harmony@meta.data[,ids]<-NULL
+cls = tils.CD8.harmony@meta.data[,ids]
+
+DimPlot(tils.CD8.harmony, label=TRUE)
+scores = tils.CD8.harmony@meta.data[,c('seurat_clusters', 'Group_1', 't_em_1', 'mitosis_1')]
+cluster_scores = aggregate(scores, list(scores$seurat_clusters), mean) 
+## T eff: clusters 0, 10, 11, 7 all have scores above 1
+## T em: clusters 13 and 8 have scores above 2
+## mitosis: cluster 5 has a high score (2.99)
+
+```
+
+```{r save matrix file}
+tils.CD8.harmony = readRDS('Seurat_Objects/tils.CD8.R0.6.harmonized.20200422.rds')
+DimPlot(tils.CD8.harmony)
+
+library(Matrix)
+writeMM(obj = t(tils.CD8.harmony@assays$RNA@counts), file="cd8_counts_sparse_matrix_t.mtx")
+meta = tils.CD8.harmony@meta.data[,c('seurat_clusters', 'final.family.counts', 'final.clonotype.family', 'patient', 'TCR.Clone', 'percent_mito', 'nCount_RNA')]
+write.table(meta, 'tils_cd8_meta.txt', sep='\t', row.names=F, quote=F)
+genes = data.frame('genes'=rownames(tils.CD8.harmony))
+write.table(genes, 'tils_cd8_genes.txt', sep='\t', quote=F, row.names=F)
+cells = data.frame('cells'=rownames(meta))
+write.table(cells, 'tils_cd8_cells.txt', sep='\t', row.names = F, quote=F)
+
+## get just cluster 4
+cd8.12 = subset(tils.CD8.harmony, idents='12')
+FeaturePlot(cd8.12, features=c('CD45RA.CITEseq.norm','CD62L.CITEseq.norm'), min.cutoff = 1.5)
+m = cd8.12@meta.data
+high = m %>% subset(CD45RA.CITEseq.norm > 1.5 & CD62L.CITEseq.norm > 1.5); dim(high)
+cd8.12.high = subset(cd8.12, cells=rownames(high))
+FeaturePlot(cd8.12.high, features=c('CD45RA.CITEseq.norm','CD62L.CITEseq.norm'), min.cutoff = 1.5)
+rownames(high)
+
+```
+
+
+
+# Just CD4 TILS
+```{r subset out tils}
+
+cells <- rownames(tils.harmony@meta.data)[(tils.harmony@meta.data$cd4.adt==1 & tils.harmony@meta.data$cd8.adt==0)]; length(cells)
+tils.CD4.harmony <- subset(tils.harmony, cells = cells)
+tils.CD4.harmony <- NormalizeData(tils.CD4.harmony, assay = "RNA", normalization.method = "LogNormalize", scale.factor = 1e6)
+
+```
+### Check selection
+```{r plotting various things}
+p1 = FeaturePlot(tils.CD4.harmony, features='cd4.adt')
+p2 = FeaturePlot(tils.CD4.harmony, features='cd8.adt')
+p3 = FeaturePlot(tils.CD4.harmony, features='dp.adt')
+p4 = FeaturePlot(tils.CD4.harmony, features='dn.adt')
+plot_grid(p1, p2, p3, p4)
+DimPlot(tils.harmony, reduction='umap', label=TRUE)
+DimPlot(tils.CD4.harmony, reduction='umap', label=TRUE)
+
+
+```
+
+
+#### Cluster again
+```{r recluster}
+
+tils.CD4.harmony <- tils.CD4.harmony %>% 
+    RunUMAP(reduction = "harmony", dims=1:50) %>%
+    FindNeighbors(reduction = "harmony", dims = 1:50) %>% 
+    FindClusters(resolution = 0.6) %>% 
+    identity()
+
+DimPlot(tils.CD4.harmony, reduction='umap', label=TRUE)
+DimPlot(tils.CD4.harmony, reduction='umap', split.by='patient')
+```
+
+#Save and reload the data
+```{r save data}
+saveRDS(tils.CD4.harmony, 'Seurat_Objects/tils.CD4.harmonized.20200514.rds')
+tils.CD4.harmony = readRDS('Seurat_Objects/tils.CD4.harmonized.20200514.rds')
+tils.CD4.harmony$clusters <- tils.CD4.harmony$seurat_clusters
+library(Matrix)
+writeMM(obj = t(tils.CD4.harmony@assays$RNA@counts), file="cd4_counts_sparse_matrix_t.mtx")
+meta = tils.CD4.harmony@meta.data[,c('seurat_clusters', 'final.family.counts', 'final.clonotype.family', 'patient', 'TCR.Clone')]
+write.table(meta, 'tils_cd4_meta.txt', sep='\t', row.names=F, quote=F)
+genes = data.frame('genes'=rownames(tils.CD4.harmony))
+write.table(genes, 'tils_cd4_genes.txt', sep='\t', quote=F, row.names=F)
+
+## get just cluster 4
+cd4.4 = subset(tils.CD4.harmony, idents='4')
+FeaturePlot(cd4.4, features=c('CD45RA.CITEseq.norm','CD62L.CITEseq.norm'), min.cutoff = 1.5)
+m = cd4.4@meta.data
+high = m %>% subset(CD45RA.CITEseq.norm > 1.5 & CD62L.CITEseq.norm > 1.5); dim(high)
+cd4.4.high = subset(cd4.4, cells=rownames(high))
+FeaturePlot(cd4.4.high, features=c('CD45RA.CITEseq.norm','CD62L.CITEseq.norm'), min.cutoff = 1.5)
+rownames(high)
+```
+
+
+
+## Run UMAP on tils.CD4..harmony cells at different resolutions
+```{r res til, message=FALSE, warning=FALSE}
+res = c(0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1)
+
+for (i in res) {
+  tils.CD4.harmony <- FindClusters(tils.CD4.harmony, resolution=i)
+  tils.CD4.harmony@meta.data[,paste0('clusters_', as.character(i))]<-tils.CD4.harmony$seurat_clusters
+}
+
+clustree(tils.CD4.harmony)
+
+```
+
+### Plotting different resolutions
+```{r plotting tils.harmony resolutions, message=FALSE, warning=FALSE}
+Idents(tils.CD4.harmony) <- tils.CD4.harmony$clusters_0.3
+d1 = DimPlot(tils.CD4.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.30")
+
+Idents(tils.CD4.harmony) <- tils.CD4.harmony$clusters_0.35
+d2 = DimPlot(tils.CD4.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.35")
+
+Idents(tils.CD4.harmony) <- tils.CD4.harmony$clusters_0.4
+d3 = DimPlot(tils.CD4.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.40")
+
+Idents(tils.CD4.harmony) <- tils.CD4.harmony$clusters_0.45
+d4 = DimPlot(tils.CD4.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.45")
+
+Idents(tils.CD4.harmony) <- tils.CD4.harmony$clusters_0.5
+d5 = DimPlot(tils.CD4.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.50")
+
+Idents(tils.CD4.harmony) <- tils.CD4.harmony$clusters_0.55
+d6 = DimPlot(tils.CD4.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.55")
+
+Idents(tils.CD4.harmony) <- tils.CD4.harmony$clusters_0.6
+d7 = DimPlot(tils.CD4.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.60")
+
+Idents(tils.CD4.harmony) <- tils.CD4.harmony$clusters_0.65
+d8 = DimPlot(tils.CD4.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.65")
+
+Idents(tils.CD4.harmony) <- tils.CD4.harmony$clusters_0.7
+d9 = DimPlot(tils.CD4.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.70")
+
+Idents(tils.CD4.harmony) <- tils.CD4.harmony$clusters_0.75
+d10 = DimPlot(tils.CD4.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.75")
+
+Idents(tils.CD4.harmony) <- tils.CD4.harmony$clusters_0.8
+d11 = DimPlot(tils.CD4.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.80")
+
+Idents(tils.CD4.harmony) <- tils.CD4.harmony$clusters_0.85
+d12 = DimPlot(tils.CD4.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.85")
+
+Idents(tils.CD4.harmony) <- tils.CD4.harmony$clusters_0.9
+d13 = DimPlot(tils.CD4.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.90")
+
+Idents(tils.CD4.harmony) <- tils.CD4.harmony$clusters_0.95
+d14 = DimPlot(tils.CD4.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 0.95")
+
+Idents(tils.CD4.harmony) <- tils.CD4.harmony$clusters_1
+d15 = DimPlot(tils.CD4.harmony, reduction = "umap", label = TRUE) + labs(title = "Res = 1")
+
+
+plot_grid(d1, d2)
+plot_grid(d3, d4)
+plot_grid(d5, d6)
+plot_grid(d7, d8)
+plot_grid(d9, d10)
+plot_grid(d11,d12)
+plot_grid(d15,d14, d15)
+
+```
+
+
+
+# Find markers for each cluster
+```{r top til.cd4 markers}
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+til.CD4.markers <- FindAllMarkers(tils.CD4.harmony, min.pct = 0.25, logfc.threshold = log(2))
+top_10 = til.CD4.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC)
+
+top_10 = data.frame(top_10)
+show(top_10)
+write.table(top_10, 'harmonizedtilsCD4_top10genes_by_cluster.xlsx', sep=',')
+
+png("./Plots/harmonizedtilsCD4_top10_heatmap.png", width = 10, height = 7, units='in', res=500)
+DoHeatmap(tils.CD4.harmony, features = top_10$gene) + font("xy.text", size = 4)
+dev.off()
+
+
+top20 <- til.CD4.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_logFC)
+png("./Plots/harmonizedtilsCD4_top20_heatmap.png", width = 10, height = 8, units='in', res=500)
+DoHeatmap(tils.CD4.harmony, features = top20$gene) + font("xy.text", size = 3) 
+dev.off()
+
+write.table(til.CD4.markers, file='harmonizedtilsCD4.markers.xlsx', sep=',')
+```
+
+
+
+# Make Heatmaps with selected genes
+```{r top til.cd4 markers}
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+genes = c('CD4', 'CD8A','GZMK', 'GZMM', 'PRF1', 'IFNG', 'FASLG', 
+             'TNF', 'CD69', 'ICOS', 'TNFRSF9', 'HLA-DRA', 'ENTPD1')
+
+Idents(tils.CD4.harmony)<-tils.CD8.harmony$clusters
+png(" ## FILE ## ", width = 10, height = 7, units='in', res=500)
+DoHeatmap(tils.CD4.harmony, features = genes, slot='data', lines.width = 300) + #font("xy.text", size = 4) + 
+  #theme(legend.position = "none") +
+  scale_fill_gradientn(colors = c("blue", rep('chartreuse4', 20), rep('chartreuse3', 3), rep('chartreuse2', 3), rep('chartreuse1', 3), "yellow"))
+dev.off()
+
+
+```
+
+
+#Get table clonotype distribution within clusters 
+```{r echo=FALSE, eval=FALSE}
+g.table = tils.CD4.harmony@meta.data[,c('orig.ident', 'sample', 'TCR.Clone', 'til.clonotype.family', 'final.clonotype.family', 'final.family.counts', 'til.pre.clonotype.family', 'til.rel.clonotype.family', 'patient', 'clusters','seurat_clusters')]
+g.table$cell.barcode <- rownames(tils.CD4.harmony@meta.data)
+rownames(g.table) <- rownames(tils.CD4.harmony@meta.data)
+
+
+wb <- createWorkbook()
+name <- "TCR clones"
+addWorksheet(wb, name)
+writeData(wb, sheet = name, g.table)
+
+saveWorkbook(wb, file = 'tilsCD4.harmony.clonotype.cluster.spreadsheet.xlsx', overwrite = TRUE)
+
+```
+
+
+
+
+

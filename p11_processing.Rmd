@@ -1,0 +1,548 @@
+---
+title: "Melanoma p11 Analysis"
+author: "Kari Stromhaug and Giacomo Oliveira"
+date: "03/06/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Description
+Analysis of scRNA-seq data (with coupled antibody capture and TCR) from a melanoma patient (8 sampels in total) and TCR tracing
+
+# Loading libraries and setting path
+```{r loading libraries, echo=FALSE, warning=FALSE, message=FALSE}
+library(dplyr)
+library(knitr)
+library(ggpubr)
+library(cowplot)
+library(Seurat)
+library(openxlsx)
+library(stringr)
+library(Biostrings)
+library(clustree)
+
+setwd("~/Dropbox (Partners HealthCare)/Melanoma p2 Analysis/")
+```
+# Defining sample names
+```{r define variables useful for loading data}
+sample_ids = c(1:8)
+
+filelabels = c("PBMC.rds", "TIL_pre_CD45neg.rds",
+               "TIL_pre_CD45pos_CD3neg.rds",
+               "TIL_pre_CD45pos_CD3pos-1.rds", "TIL_pre_CD45pos_CD3pos-2.rds", "TIL_pre_CD45pos_CD3pos-3.rds", 
+               "TIL_rel-1.rds", "TIL_rel-2.rds")
+
+samplelabels = c("PBMC", "TIL_pre_CD45neg", 
+                 "TIL_pre_CD45pos_CD3neg",
+               "TIL_pre_CD45pos_CD3pos-1", "TIL_pre_CD45pos_CD3pos-2", "TIL_pre_CD45pos_CD3pos-3", 
+               "TIL_rel-1", "TIL_rel-2")
+
+```
+
+# Reading scRNA-seq and antibody data
+```{r read RNA and ADT data}
+i = 1
+show(getwd())
+data.rna = readRDS(file.path("../patient11", filelabels[1]))$`Gene Expression`
+data.adt = readRDS(file.path("../patient11", filelabels[1]))$`Antibody Capture`
+
+colnames(data.rna) = paste0(colnames(data.rna), "-", i)
+colnames(data.adt) = paste0(colnames(data.adt), "-", i)
+sample_id_array = rep(filelabels[1], ncol(data.rna))
+for (filelabel in filelabels[2:length(filelabels)]) {
+  i = i + 1
+  cat(file.path("../patient11", filelabel), '\n')
+  data.rna_i = readRDS(file.path("../patient11", filelabel))$`Gene Expression`
+  data.adt_i = readRDS(file.path("../patient11", filelabel))$`Antibody Capture`
+  colnames(data.rna_i) = paste0(colnames(data.rna_i), "-", i)
+  colnames(data.adt_i) = paste0(colnames(data.adt_i), "-", i)
+  sample_id_array = c(sample_id_array, rep(filelabel, ncol(data.rna_i)))
+
+  cat(nrow(data.rna), nrow(data.rna_i), '\n')
+  data.rna = cbind(data.rna, data.rna_i)
+  cat(nrow(data.adt), nrow(data.adt_i), '\n')
+  data.adt = cbind(data.adt, data.adt_i)
+}
+
+```
+
+
+# Generating a Seurat object
+```{r create seurat object}
+p11 = CreateSeuratObject(counts = data.rna, min.cells = 0, min.features = 0, 
+                         names.field = 2, names.delim = "-", project = "melanoma")
+
+# adding adt data
+p11[["ADT"]] <- CreateAssayObject(counts = data.adt)
+```
+
+
+# Getting statistics
+```{r, fig.width = 12, fig.height=5,  message = FALSE, warning = FALSE}
+cell_ident = plyr::mapvalues(x = p11@meta.data$orig.ident, 
+                       from = sample_ids,
+                       to = samplelabels)
+
+names(cell_ident) = rownames(p11@meta.data)
+p11 = AddMetaData(p11, cell_ident, col.name = "sample")
+Idents(object = p11) <- p11@meta.data$sample
+
+# size of the original data
+print("Total number of genes; total number of barcodes")
+dim(data.rna)
+dim(data.adt) # no. cells should be equal
+
+# size per sample
+count1 = table(p11@meta.data$sample)
+
+mito_genes = grep("^MT-", rownames(p11@assays$RNA@data), value = T)
+percent_mito = Matrix::colSums(expm1(p11@assays$RNA@data[mito_genes, ]))/Matrix::colSums(expm1(p11@assays$RNA@data))
+p11 = AddMetaData(p11, percent_mito, "percent_mito")
+
+par(mfrow = c(1, 3))
+FeatureScatter(p11, "nFeature_RNA", "nCount_RNA")
+FeatureScatter(p11, "nFeature_RNA", "percent_mito")
+FeatureScatter(p11, "nCount_RNA", "percent_mito")
+```
+
+# Quality control (>250 nUMI, <10000 nUMI, <20% mitochondrial gene content)
+Pre-filtering plots 
+```{r quality control, fig.width = 12, fig.height=5, message = FALSE, warning=FALSE}
+Idents(object = p11) <- p11@meta.data$sample
+VlnPlot(object = p11, features = c("nFeature_RNA", "nCount_RNA", "percent_mito"), ncol = 3, pt.size = 0)
+```
+
+Running filtering steps
+```{r filtering steps, fig.width = 12, fig.height=5, message = FALSE, warning=FALSE}
+# remove cells with low nUMI
+p11 = SubsetData(p11, subset.name = "nCount_RNA", low.threshold  = 250)
+count.umi.low = table(p11@meta.data$sample)
+
+# remove cells with high mitochondrial content
+p11 = SubsetData(p11, subset.name = "percent_mito", high.threshold  = 0.20)
+count.mito = table(p11@meta.data$sample)
+
+# remove cells with too high UMI count (for doublet exclusion)
+p11 = SubsetData(p11, subset.name = "nCount_RNA", high.threshold = 10000)
+count.umi.high = table(p11@meta.data$sample)
+dim(p11)
+```
+  
+  
+Post-filtering plots
+```{r post-filtering plots, fig.width = 12, fig.height=5, message = FALSE, warning=FALSE}
+VlnPlot(object = p11, features = c("nFeature_RNA", "nCount_RNA", "percent_mito"), ncol = 3, pt.size = 0)
+```
+
+Counting number of cells that passed each filter  
+```{r counting cells}
+count_stats = data.frame(raw = data.frame(count1)$Freq,
+                         numi_250 = data.frame(count.umi.low)$Freq,
+                         mito_20p = data.frame(count.mito)$Freq,
+                         numi_10000 = data.frame(count.umi.high)$Freq,
+                         row.names = data.frame(count1)$Var1)
+
+count_stats
+```
+
+Adding a TCR detection filtering step
+```{r tcr detection filtering step, eval=FALSE, echo=FALSE}
+# reading TCR data and adding suffix according to numbers in seurat object (pbmc_post, pbmc_pre, pbmc_relapse ...)
+p11_pbmc <- read.xlsx("tcr_data/new_p11_pbmc_TCRs.xlsx") 
+p11_pbmc$origin <- "pbmc"
+
+p11_til_CD45pos_CD3neg <- read.xlsx("tcr_data/new_p11_til_CD45pos_CD3neg_TCRs.xlsx") 
+p11_til_CD45pos_CD3neg$cell.barcode <- gsub("-1", "-3", p11_til_CD45pos_CD3neg$cell.barcode)
+p11_til_CD45pos_CD3neg$origin <- "til_CD45pos_CD3neg"
+
+p11_til_pre_CD45pos_CD3pos_1 <- read.xlsx("tcr_data/new_p11_til_pre_CD45pos_CD3pos_1_TCRs.xlsx")
+p11_til_pre_CD45pos_CD3pos_1$cell.barcode <- gsub("-1", "-4", p11_til_pre_CD45pos_CD3pos_1$cell.barcode)
+p11_til_pre_CD45pos_CD3pos_1$origin <- "til_pre_CD45pos_CD3pos_1"
+
+p11_til_pre_CD45pos_CD3pos_2 <- read.xlsx("tcr_data/new_p11_til_pre_CD45pos_CD3pos_2_TCRs.xlsx")
+p11_til_pre_CD45pos_CD3pos_2$cell.barcode <- gsub("-1", "-5", p11_til_pre_CD45pos_CD3pos_2$cell.barcode)
+p11_til_pre_CD45pos_CD3pos_2$origin <- "til_pre_CD45pos_CD3pos_2"
+
+p11_til_pre_CD45pos_CD3pos_3 <- read.xlsx("tcr_data/new_p11_til_pre_CD45pos_CD3pos_3_TCRs.xlsx")
+p11_til_pre_CD45pos_CD3pos_3$cell.barcode <- gsub("-1", "-6", p11_til_pre_CD45pos_CD3pos_3$cell.barcode)
+p11_til_pre_CD45pos_CD3pos_3$origin <- "til_pre_CD45pos_CD3pos_3"
+
+p11_til_rel_1 <- read.xlsx("tcr_data/new_p11_til_rel_1_TCRs.xlsx")
+p11_til_rel_1$cell.barcode <- gsub("-1", "-7", p11_til_rel_1$cell.barcode)
+p11_til_rel_1$origin <- "til_rel_1"
+
+p11_til_rel_2 <- read.xlsx("tcr_data/new_p11_til_rel_2_TCRs.xlsx")
+p11_til_rel_2$cell.barcode <- gsub("-1", "-8", p11_til_rel_2$cell.barcode)
+p11_til_rel_2$origin <- "til_rel_2"
+
+
+
+# cells to exclude
+remove <- c(p11_pbmc$cell.barcode[p11_pbmc$category %in% c("6.multiple")],
+            p11_til_CD45pos_CD3neg$cell.barcode[p11_til_CD45pos_CD3neg$category %in% c("6.multiple")],
+            p11_til_pre_CD45pos_CD3pos_1$cell.barcode[p11_til_pre_CD45pos_CD3pos_1$category %in% c("6.multiple")],
+            p11_til_pre_CD45pos_CD3pos_2$cell.barcode[p11_til_pre_CD45pos_CD3pos_2$category %in% c("6.multiple")],
+            p11_til_pre_CD45pos_CD3pos_3$cell.barcode[p11_til_pre_CD45pos_CD3pos_3$category %in% c("6.multiple")],
+            p11_til_rel_1$cell.barcode[p11_til_rel_1$category %in% c("6.multiple")],
+            p11_til_rel_2$cell.barcode[p11_til_rel_2$category %in% c("6.multiple")])
+
+# count before removing
+count.umi.high = table(p11@meta.data$sample)
+
+p11 = subset(p11, cells = names(Idents(p11))[!names(Idents(p11)) %in% remove]) 
+count.tcr = table(p11@meta.data$sample)
+```
+
+Counting number of cells that passed the filter
+```{r count cells passing filter, echo=FALSE, eval=FALSE}
+count_stats = data.frame(numi_10000 = data.frame(count.umi.high)$Freq,
+                         tcr = data.frame(count.tcr)$Freq,
+                         row.names = data.frame(count.tcr)$Var1)
+
+count_stats
+
+# data dimensions after filtering
+print("Total number of genes; total number of barcodes")
+dim(p11)
+```
+
+New post-filtering plots
+```{r new post-filtering plots, fig.width = 12, fig.height=5, message = FALSE, warning=FALSE}
+VlnPlot(object = p11, features = c("nFeature_RNA", "nCount_RNA", "percent_mito"), ncol = 3, pt.size = 0)
+```
+
+# Normalization
+```{r normalization,}
+# RNA normalization
+p11 <- NormalizeData(p11, assay = "RNA", normalization.method = "LogNormalize", scale.factor = 1e6)
+
+# ADT normalization
+p11 <- NormalizeData(p11, assay = "ADT", normalization.method = "CLR")
+```
+
+# Save and reload data
+```{r Load Data 2, echo=FALSE}
+saveRDS(p11, file = "R_output/Seurat_objects/p11.seurat.20200306")
+p11 = readRDS(file = "R_output/Seurat_objects/p11.seurat.20200306")
+```
+
+
+# Read in TCR clonotype matching
+```{r read in TCR clonotype matches, eval=FALSE}
+tcr.clone = read.xlsx('R_output/p11_clonotype_matches_revised.xlsx')
+```
+
+# add TCR clonotype matches to metadata
+```{r add in TCR clonotype matches}
+barcodes = p11@meta.data[,c('nCount_RNA', 'orig.ident')]
+barcodes$cell.barcode = rownames(barcodes)
+tcr.sub = tcr.clone[,c('TCR.clonotype.ID.revised', 'til.pre.clonotype.family', 'til.rel.clonotype.family', 'cell.barcode')];
+
+allb = merge(barcodes, tcr.sub, by='cell.barcode', all=TRUE)
+rownames(allb)<-allb$cell.barcode
+head(allb); allb = allb[rownames(barcodes), ]; head(allb)
+
+p11 <- AddMetaData(p11, metadata=allb$TCR.clonotype.ID.revised, col.name="TCR.Clone")
+p11 <- AddMetaData(p11, metadata=allb$til.pre.clonotype.family, col.name="til.pre.clonotype.family")
+p11 <- AddMetaData(p11, metadata=allb$til.rel.clonotype.family, col.name="til.rel.clonotype.family")
+
+```
+
+
+## Normalization of different proteins in ADT dataset
+```{r ADT normalization old , warning=FALSE, message=FALSE, eval=FALSE}
+meta.df = data.frame(matrix(ncol=ncol(p11@assays$ADT@data), nrow=nrow(p11@assays$ADT@data)))
+colnames(meta.df) = colnames(p11@assays$ADT@data)
+for (cell in colnames(p11@assays$ADT@data)) {
+  isotypesmean = mean(p11@assays$ADT@data[c("IgG1isotype-CITEseq", "IgG2aisotype-CITEseq", "IgG2bisotype-CITEseq"), cell])
+  cell.data = p11@assays$ADT@data[,cell]
+  op1 = as.numeric(cell.data/isotypesmean)
+  op11 = as.numeric(cell.data+1-isotypesmean)
+  if(isotypesmean>=1) {
+    cell.norm = op1
+  } else { cell.norm= op11}
+  meta.df[,cell]<-cell.norm
+}
+rownames(meta.df) <- paste0(rownames(p11@assays$ADT@data), '.norm')
+meta.df = data.frame(meta.df)
+for (row in rownames(meta.df)) {
+  add = as.numeric(meta.df[row,])
+  p11 <- AddMetaData(p11, metadata = add, col.name=row)
+}
+
+```
+
+
+# Clustering on ALL p11 data
+```{r cluster p11}
+p11 <- FindVariableFeatures(object = p11)
+p11 <- ScaleData(object = p11)
+cat("Number of variable genes", length(x = VariableFeatures(object = p11)), '\n')
+p11 <- RunPCA(object = p11, features = VariableFeatures(object = p11), verbose = FALSE)
+p11 <- RunUMAP(p11, reduction = "pca", dims = 1:50)
+p11 <- FindNeighbors(object = p11, dims = 1:50)
+p11 <- FindClusters(object = p11)
+p11$clusters <- Idents(object = p11)
+
+Idents(p11) <- p11$clusters
+DimPlot(p11, reduction = "umap", label = TRUE)
+
+Idents(p11) <- p11@meta.data$sample
+DimPlot(p11, reduction = "umap")
+
+FeaturePlot(p11, features = "CD56.CITEseq.norm", sort.cell = TRUE, reduction = "umap", pt.size = 0.1, min.cutoff = 1, max.cutoff = 2.5)
+
+FeaturePlot(p11, features = "NCAM1", sort.cell = TRUE, reduction = "umap",)
+```
+
+
+# Remove contaminant clusters and cells
+```{r remove contaminant clusters}
+cells.TrueT = rownames(p11@meta.data)[p11@meta.data$clusters %in% c(0,1,3,4,5,6,10,14,21,23,24)]
+length(cells.TrueT)
+
+count.umi.high = table(p11@meta.data$sample)
+p11.TrueT <- subset(p11, cells = cells.TrueT)
+DimPlot(p11.TrueT, reduction = "umap")
+count.umi = table(p11.TrueT@meta.data$sample)
+
+
+umaps = data.frame(p11.TrueT@reductions$umap@cell.embeddings)
+want = umaps %>% subset(UMAP_1 > -5 & UMAP_1 < 6.5 & UMAP_2 < 7)
+dim(want); dim(umaps)
+cells.TrueTbis = rownames(want); length(cells.TrueTbis)
+TrueTbis <- subset(p11.TrueT, cells=cells.TrueTbis)
+DimPlot(TrueTbis, reduction = "umap")
+
+
+Idents(object = TrueTbis) <- TrueTbis@meta.data$sample
+cells = names(Idents(TrueTbis))[Idents(TrueTbis) %in% c("PBMC", "TIL_pre_CD45pos_CD3pos-1", "TIL_pre_CD45pos_CD3pos-2", "TIL_pre_CD45pos_CD3pos-3", "TIL_rel-1", "TIL_rel-2")]
+               
+data_adt <- TrueTbis@meta.data[cells, ]
+true_t_cells_adt <- rownames(data_adt)[data_adt[,"CD19.CITEseq.norm"] < 1.9 & data_adt[,'CD11b.CITEseq.norm'] < 1.8]; length(true_t_cells_adt)
+data_rna <- TrueTbis@assays$RNA@data[,cells]
+true_t_cells_rna <- colnames(data_rna)[data_rna["ITGAM", ] < 3.5 & data_rna['CD19', ] < 3.5]; length(true_t_cells_rna)
+true_t_cells <- intersect(true_t_cells_adt, true_t_cells_rna); length(true_t_cells)
+
+count.umi.high = table(p11.TrueT@meta.data$sample)
+trueT <- subset(TrueTbis, cells = true_t_cells)
+trueT <- NormalizeData(trueT, assay = "RNA", normalization.method = "LogNormalize", scale.factor = 1e6)
+count.umi = table(trueT@meta.data$sample)
+DimPlot(trueT, reduction = "umap")
+DimPlot(trueT, reduction = "umap", split.by ="orig.ident")
+
+```
+
+```{r}
+count_stats = data.frame(numi_10000 = data.frame(count.umi.high)$Freq,
+                         tcr = data.frame(count.umi)$Freq,
+                         row.names = data.frame(count.umi)$Var1)
+
+count_stats
+```
+
+
+
+### TILSpre
+```{r plot tils, echo=FALSE, eval=FALSE}
+## TILSpre
+cells = names(Idents(p11))[Idents(p11) %in% c("TIL_pre_CD45pos_CD3pos-1", "TIL_pre_CD45pos_CD3pos-2", "TIL_pre_CD45pos_CD3pos-3")]
+smoothScatter(p11@meta.data[cells, "CD8a.CITEseq.norm"], p11@meta.data[cells, "CD4.CITEseq.norm"], xlab = "CD8A/isotypes", ylab = "CD4/isotypes", xlim = c(0, 3), ylim = c(0, 3.5))
+smoothScatter(p11@meta.data[cells, "CD3.CITEseq.norm"], p11@meta.data[cells, "CD11b.CITEseq.norm"], xlab = "CD3/isotypes", ylab = "CD11b/isotypes", xlim = c(0, 3), ylim = c(0, 5))
+smoothScatter(p11@meta.data[cells, "CD3.CITEseq.norm"], p11@meta.data[cells, "CD19.CITEseq.norm"], xlab = "CD3/isotypes", ylab = "CD19/isotypes", xlim = c(0, 3), ylim = c(0, 4))
+
+smoothScatter(p11@assays$RNA@data["CD3E", cells], p11@assays$RNA@data["ITGAM", cells], xlab = "CD3", ylab = "CD11b", xlim = c(-2, 10), ylim = c(-2, 10))
+smoothScatter(p11@assays$RNA@data["CD3E", cells], p11@assays$RNA@data["CD19", cells], xlab = "CD3", ylab = "CD19", xlim = c(-2, 10), ylim = c(-2, 10))
+```
+
+
+### TILSrel
+```{r plot tils, echo=FALSE, eval=FALSE}
+## TILSrel
+cells = names(Idents(p11))[Idents(p11) %in% c("TIL_rel-1", "TIL_rel-2")]
+
+smoothScatter(p11@meta.data[cells, "CD8a.CITEseq.norm"], p11@meta.data[cells, "CD4.CITEseq.norm"], xlab = "CD8A/isotypes", ylab = "CD4/isotypes", xlim = c(0, 3), ylim = c(0, 3.5))
+smoothScatter(p11@meta.data[cells, "CD3.CITEseq.norm"], p11@meta.data[cells, "CD11b.CITEseq.norm"], xlab = "CD3/isotypes", ylab = "CD11b/isotypes", xlim = c(0, 3), ylim = c(0, 5))
+smoothScatter(p11@meta.data[cells, "CD3.CITEseq.norm"], p11@meta.data[cells, "CD19.CITEseq.norm"], xlab = "CD3/isotypes", ylab = "CD19/isotypes", xlim = c(0, 3), ylim = c(0, 4))
+
+smoothScatter(p11@assays$RNA@data["CD3E", cells], p11@assays$RNA@data["ITGAM", cells], xlab = "CD3", ylab = "CD11b", xlim = c(-2, 10), ylim = c(-2, 10))
+smoothScatter(p11@assays$RNA@data["CD3E", cells], p11@assays$RNA@data["CD19", cells], xlab = "CD3", ylab = "CD19", xlim = c(-2, 10), ylim = c(-2, 10))
+```
+
+
+### TILpre CD45posCD3neg
+```{r plot tils, echo=FALSE, eval=FALSE}
+## TILpre CD45pos CD3neg
+cells = names(Idents(p11))[Idents(p11) %in% c("TIL_pre_CD45pos_CD3neg")]
+
+smoothScatter(p11@meta.data[cells, "CD8a.CITEseq.norm"], p11@meta.data[cells, "CD4.CITEseq.norm"], xlab = "CD8A/isotypes", ylab = "CD4/isotypes", xlim = c(0, 3), ylim = c(0, 3.5))
+smoothScatter(p11@meta.data[cells, "CD3.CITEseq.norm"], p11@meta.data[cells, "CD11b.CITEseq.norm"], xlab = "CD3/isotypes", ylab = "CD11b/isotypes", xlim = c(0, 3), ylim = c(0, 5))
+smoothScatter(p11@meta.data[cells, "CD3.CITEseq.norm"], p11@meta.data[cells, "CD19.CITEseq.norm"], xlab = "CD3/isotypes", ylab = "CD19/isotypes", xlim = c(0, 3), ylim = c(0, 4))
+
+smoothScatter(p11@assays$RNA@data["CD3E", cells], p11@assays$RNA@data["ITGAM", cells], xlab = "CD3", ylab = "CD11b", xlim = c(-2, 10), ylim = c(-2, 10))
+smoothScatter(p11@assays$RNA@data["CD3E", cells], p11@assays$RNA@data["CD19", cells], xlab = "CD3", ylab = "CD19", xlim = c(-2, 10), ylim = c(-2, 10))
+```
+
+
+
+
+# Identification of T lymphocytes
+```{r identify T lymphocytes, echo=FALSE, eval=FALSE}
+# pbmc
+cells = names(Idents(trueT))[Idents(trueT) == "PBMC"]; length(cells)
+data <- trueT@meta.data[cells, ]; dim(data)
+pbmc.cd8 <- rownames(data)[data[, "CD8a.CITEseq.norm"] >= 1.3 & data[,"CD4.CITEseq.norm"] <= 1.5]
+pbmc.cd4 <- rownames(data)[data[, "CD8a.CITEseq.norm"] <= 1.7 & data[, "CD4.CITEseq.norm"] > 1.2]
+pbmc.dp <- rownames(data)[data[, "CD8a.CITEseq.norm"] > 1.7 & data[, "CD4.CITEseq.norm"] > 1.5]
+pbmc.dn <- rownames(data)[data[, "CD8a.CITEseq.norm"] < 1.3 & data[, "CD4.CITEseq.norm"] <= 1.2]
+
+# TILs pre
+cells = names(Idents(p11))[Idents(p11) %in% c("TIL_pre_CD45pos_CD3pos-1", "TIL_pre_CD45pos_CD3pos-2", "TIL_pre_CD45pos_CD3pos-3")]; length(cells)
+data <- trueT@meta.data[cells, ]
+tils.pre.cd8 <- rownames(data)[data[, "CD8a.CITEseq.norm"] >= 1.2 & data[, "CD4.CITEseq.norm"] <= 1.6]
+tils.pre.cd4 <- rownames(data)[data[, "CD8a.CITEseq.norm"] <= 1.4 & data[, "CD4.CITEseq.norm"] > 0.6]
+tils.pre.dp <- rownames(data)[data[, "CD8a.CITEseq.norm"] > 1.4 & data[, "CD4.CITEseq.norm"] > 1.6]
+tils.pre.dn <- rownames(data)[data[, "CD8a.CITEseq.norm"] < 1.2 & data[, "CD4.CITEseq.norm"] < 0.6]
+
+# TILs rel
+cells = names(Idents(trueT))[Idents(trueT) %in% c("TIL_rel-1", "TIL_rel-2")]; length(cells)
+data <- trueT@meta.data[cells, ]
+tils.rel.cd8 <- rownames(data)[data[, "CD8a.CITEseq.norm"] >= 0.9 & data[, "CD4.CITEseq.norm"] <= 1.6]
+tils.rel.cd4 <- rownames(data)[data[, "CD8a.CITEseq.norm"] <= 1.4 & data[, "CD4.CITEseq.norm"] > 0.6]
+tils.rel.dp <- rownames(data)[data[, "CD8a.CITEseq.norm"] > 1.4 & data[, "CD4.CITEseq.norm"] > 1.6]
+tils.rel.dn <- rownames(data)[data[, "CD8a.CITEseq.norm"] < 0.9 & data[, "CD4.CITEseq.norm"] < 0.6]
+
+# all together
+cd8.adt <- c(pbmc.cd8, tils.pre.cd8, tils.rel.cd8)
+cd4.adt <- c(pbmc.cd4, tils.pre.cd4, tils.rel.cd4)
+dp.adt <- c(pbmc.dp, tils.pre.dp, tils.rel.dp)
+dn.adt <- c(pbmc.dn, tils.pre.dn, tils.rel.dn)
+
+# remove cells from CD8 and CD4 that are double positives
+dn.adt <- dn.adt[!(dn.adt %in% cd8.adt | dn.adt %in% cd4.adt)]
+dp.adt <- dp.adt[!(dp.adt %in% cd8.adt | dp.adt %in% cd4.adt)]
+
+d = trueT@meta.data
+d$cd8.adt = ifelse(rownames(d) %in% cd8.adt, 1, 0)
+d$cd4.adt = ifelse(rownames(d) %in% cd4.adt, 1, 0)
+d$dp.adt = ifelse(rownames(d) %in% dp.adt, 1, 0)
+d$dn.adt = ifelse(rownames(d) %in% dn.adt, 1, 0)
+
+trueT = AddMetaData(trueT, metadata=d$cd8.adt, col.name='cd8.adt')
+trueT = AddMetaData(trueT, metadata=d$cd4.adt, col.name='cd4.adt')
+trueT = AddMetaData(trueT, metadata=d$dp.adt, col.name='dp.adt')
+trueT = AddMetaData(trueT, metadata=d$dn.adt, col.name='dn.adt')
+
+
+cd8.rna <- colnames(trueT@assays$RNA@data)[trueT@assays$RNA@data["CD8A",] >= 3]
+cd4.rna <- colnames(trueT@assays$RNA@data)[trueT@assays$RNA@data["CD4",] >= 3]
+
+
+nums <- c(length(cd8.adt), length(cd4.adt), length(dp.adt), length(dn.adt))
+names(nums) <- c("CD8, ADT", "CD4, ADT", "DP, ADT", "DN, ADT")
+barplot(nums, col = c("darkred", "darkred", "darkblue", "darkblue"), ylim = c(0, 25000), main = "CD8/CD4 lymphocytes")
+```
+
+
+
+# Detection of variable genes
+```{r find variable genes}
+trueT <- FindVariableFeatures(object = trueT)
+cat("Number of variable genes", length(x = VariableFeatures(object = trueT)), '\n')
+trueT <- ScaleData(object = trueT)
+trueT <- RunPCA(object = trueT, features = VariableFeatures(object = trueT), verbose = FALSE)
+
+# set number of PCs to use
+num.pc.to.use <- 50
+
+trueT <- RunUMAP(trueT, reduction = "pca", dims = 1:50)
+trueT <- FindNeighbors(object = trueT, dims = 1:num.pc.to.use)
+trueT <- FindClusters(object = trueT, resolution = 0.50)
+trueT$clusters <- Idents(object = trueT)
+DimPlot(trueT, label=TRUE)
+
+DimPlot(trueT, group.by='orig.ident')
+DimPlot(trueT, split.by='orig.ident')
+
+```
+
+
+# Just TILS
+```{r subset out tils}
+
+til.cells = rownames(trueT@meta.data)[trueT@meta.data$sample %in% c("TIL_pre_CD45pos_CD3pos-1", "TIL_pre_CD45pos_CD3pos-2", "TIL_pre_CD45pos_CD3pos-3", "TIL_rel-1", "TIL_rel-2")]; length(til.cells)
+
+tils <- subset(trueT, cells = til.cells)
+tils <- NormalizeData(tils, assay = "RNA", normalization.method = "LogNormalize", scale.factor = 1e6)
+
+```
+
+# cluster on the TILS, we choose Res 0.3
+```{r}
+
+tils <- FindVariableFeatures(object = tils)
+tils <- ScaleData(tils, features = rownames(tils))
+tils <- RunPCA(object = tils, features = VariableFeatures(object = tils), verbose = FALSE)
+tils <- RunUMAP(tils, reduction = "pca", dims = 1:50)
+tils <- FindNeighbors(object = tils, dims = 1:50)
+tils <- FindClusters(object = tils, resolution=0.3)
+tils$clusters <- Idents(object = tils)
+
+DimPlot(tils, reduction = "umap", label = TRUE)
+DimPlot(tils, reduction='umap', group.by='orig.ident')
+```
+
+
+# Save TILs data 
+```{r}
+saveRDS(tils, file = "R_output/Seurat_Objects/TILs.Res03.clustered.seurat.20200309.rds")
+tils = readRDS(file = "R_output/Seurat_Objects/TILs.Res03.clustered.seurat.20200309.rds")
+```
+
+# Find markers for each cluster
+```{r top til markers}
+
+tils.markers <- FindAllMarkers(tils, min.pct = 0.25, logfc.threshold = log(2))
+
+write.table(tils.markers, 'R_output/tils.markers.xlsx', sep=',')
+
+top_10 = tils.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC)
+top_10 = data.frame(top_10)
+show(top_10)
+
+top_20 = tils.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_logFC)
+top_20 = data.frame(top_20)
+
+png("./R_output/plots/tils.top10_heatmap.png", width = 10, height = 7, units='in', res=500)
+DoHeatmap(tils, features = top_10$gene) + font("xy.text", size = 4)
+dev.off()
+
+png("./R_output/plots/tils.top20_heatmap.png", width = 10, height = 7, units='in', res=500)
+DoHeatmap(tils, features = top_20$gene) + font("xy.text", size = 4)
+dev.off()
+
+```
+
+
+#Get table clonotype distribution within clusters 
+```{r echo=FALSE, eval=FALSE}
+g.table = tils@meta.data[,c('orig.ident', 'sample', 'TCR.Clone', 'til.pre.clonotype.family','til.rel.clonotype.family', 'clusters')]
+g.table$cell.barcode <- rownames(tils@meta.data)
+rownames(g.table) <- rownames(tils@meta.data)
+
+g.table = merge(g.table, tcr.clone[,c('cell.barcode', 'clone', 'til.pre.counts', 'til.post.counts')], by='cell.barcode', all.x=TRUE); 
+dim(g.table); dim(tils@meta.data)
+head(g.table)
+
+wb <- createWorkbook()
+name <- "TCR clones"
+addWorksheet(wb, name)
+writeData(wb, sheet = name, g.table)
+
+saveWorkbook(wb, file = 'R_output/tils.clonotype.cluster.spreadsheet.xlsx', overwrite = TRUE)
+
+```
+
+

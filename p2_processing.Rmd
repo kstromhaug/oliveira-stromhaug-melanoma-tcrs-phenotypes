@@ -1,0 +1,430 @@
+---
+title: "Patient 2 CD8 TIL Analysis"
+author: "Kari Stromhaug"
+date: "9/15/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Description
+Analysis of scRNA-seq data (with coupled antibody capture and TCR) from a melanoma patient (8 sampels in total) and TCR tracing
+
+# Loading libraries and setting path
+```{r loading libraries, echo=FALSE, warning=FALSE, message=FALSE}
+library(dplyr)
+library(knitr)
+library(ggpubr)
+library(cowplot)
+library(Seurat)
+library(openxlsx)
+library(stringr)
+library(Biostrings)
+library(clustree)
+
+setwd("~/Dropbox (Partners HealthCare)/Melanoma P2 Analysis/")
+```
+# Defining sample names
+```{r define variables useful for loading data, echo=FALSE}
+sample_ids = c(1:8)
+
+filelabels = c("pool78-26_new.rds", "pool78-25_new.rds", 
+               "pool78-27_new.rds", "pool78-20_new.rds", "pool78-21_new.rds",
+               "pool78-22_new.rds", "pool78-23_new.rds", "pool78-24_new.rds")
+
+samplelabels = c("PBMC_post_CD45pos_CD3pos", "PBMC_pre_CD45pos_CD3pos",
+                 "PBMC_relapse_CD45pos_CD3pos", "TIL_CD45neg", "TIL_CD45pos_CD3neg",
+                 "TIL_CD45pos_CD3pos-1", "TIL_CD45pos_CD3pos-2", "TIL_CD45pos_CD3pos-3")
+
+```
+
+# Reading scRNA-seq and antibody data
+```{r read RNA and ADT data, eval=TRUE, echo=FALSE}
+setwd("~/Dropbox (Partners HealthCare)/Melanoma P2 Analysis/patient2/")
+i = 1
+data.rna = readRDS(file.path("data/", filelabels[1]))$`Gene Expression`
+data.adt = readRDS(file.path("data/", filelabels[1]))$`Antibody Capture`
+
+colnames(data.rna) = paste0(colnames(data.rna), "-", i)
+colnames(data.adt) = paste0(colnames(data.adt), "-", i)
+sample_id_array = rep(samplelabels[1], ncol(data.rna))
+  
+for (filelabel in filelabels[2:length(sample_ids)]) {
+  i = i + 1
+  samplelabel = samplelabels[i]
+  data.rna_i = readRDS(file.path("data/", filelabel))$`Gene Expression`
+  data.adt_i = readRDS(file.path("data/", filelabel))$`Antibody Capture`
+  colnames(data.rna_i) = paste0(colnames(data.rna_i), "-", i)
+  colnames(data.adt_i) = paste0(colnames(data.adt_i), "-", i)
+  sample_id_array = c(sample_id_array, rep(samplelabel, ncol(data.rna_i)))
+  data.rna = cbind(data.rna, data.rna_i)
+  data.adt = cbind(data.adt, data.adt_i)
+}
+```
+
+# Generating a Seurat object
+```{r create seurat object, eval=TRUE, echo=FALSE}
+p2 <- CreateSeuratObject(counts = data.rna, min.cells = 0, min.features = 0, 
+                         names.field = 2, names.delim = "-", project = "melanoma")
+
+# adding adt data
+p2[["ADT"]] <- CreateAssayObject(counts = data.adt)
+```
+
+# Getting statistics
+```{r, fig.width = 12, fig.height=5,  message = FALSE, warning = FALSE, echo=FALSE, eval=TRUE}
+cell_ident <- plyr::mapvalues(x = p2@meta.data$orig.ident, 
+                       from = sample_ids,
+                       to = samplelabels)
+
+names(cell_ident) <- rownames(p2@meta.data)
+p2 <- AddMetaData(p2, cell_ident, col.name = "sample")
+Idents(object = p2) <- p2@meta.data$sample
+
+# size per sample
+count1 <- table(p2@meta.data$sample)
+
+mito_genes <- grep("^MT-", rownames(p2@assays$RNA@data), value = T)
+percent_mito <- Matrix::colSums(expm1(p2@assays$RNA@data[mito_genes, ]))/Matrix::colSums(expm1(p2@assays$RNA@data))
+p2 <- AddMetaData(p2, percent_mito, "percent_mito")
+```
+
+Running filtering steps
+```{r filtering steps, fig.width = 12, fig.height=5, message = FALSE, warning=FALSE, eval=TRUE, echo=FALSE}
+# remove cells with low nUMI
+meta <- p2@meta.data
+cells.keep <- rownames(meta[meta$nCount_RNA>250, ])
+p2 <- subset(p2, cells=cells.keep)
+count.umi.low <- table(p2@meta.data$sample)
+
+# remove cells with high mitochondrial content
+cells.keep <- rownames(meta[meta$percent_mito< 0.20, ])
+p2 <- subset(p2, cells=cells.keep)
+count.mito <- table(p2@meta.data$sample)
+
+# remove cells with too high UMI count (for doublet exclusion)
+cells.keep <- rownames(meta[meta$nCount_RNA<10000, ])
+p2 <- subset(p2, cells=cells.keep)
+count.umi.high <- table(p2@meta.data$sample)
+dim(p2)
+```
+  
+
+Counting number of cells that passed each filter  
+```{r counting cells, eval=TRUE, echo=FALSE}
+count_stats <- data.frame(raw = data.frame(count1)$Freq,
+                         numi_250 = data.frame(count.umi.low)$Freq,
+                         mito_20p = data.frame(count.mito)$Freq,
+                         numi_10000 = data.frame(count.umi.high)$Freq,
+                         row.names = data.frame(count1)$Var1)
+
+count_stats
+```
+
+Adding a TCR detection filtering step
+```{r tcr detection filtering step, eval=TRUE, echo=FALSE}
+# reading TCR data and adding suffix according to numbers in seurat object (pbmc_post, pbmc_pre, pbmc_relapse ...)
+PBMC_pre_CD45pos_CD3pos_tcrs <- read.xlsx("data/tcr_data/PBMC_pre_CD45pos_CD3pos-TCRs.xlsx")
+PBMC_pre_CD45pos_CD3pos_tcrs$cell.barcode <- gsub("-1", "-2", PBMC_pre_CD45pos_CD3pos_tcrs$cell.barcode)
+PBMC_pre_CD45pos_CD3pos_tcrs$origin <- "PBMC_pre"
+
+PBMC_post_CD45pos_CD3pos_tcrs <- read.xlsx("data/tcr_data/PBMC_post_CD45pos_CD3pos-TCRs.xlsx") # has the correct suffix (-1)
+PBMC_post_CD45pos_CD3pos_tcrs$origin <- "PBMC_post"
+
+PBMC_relapse_CD45pos_CD3pos_tcrs <- read.xlsx("data/tcr_data/PBMC_relapse_CD45pos_CD3pos-TCRs.xlsx")
+PBMC_relapse_CD45pos_CD3pos_tcrs$cell.barcode <- gsub("-1", "-3", PBMC_relapse_CD45pos_CD3pos_tcrs$cell.barcode)
+PBMC_relapse_CD45pos_CD3pos_tcrs$origin <- "PBMC_relapse"
+
+TIL_CD45neg_tcrs <- read.xlsx("data/tcr_data/TIL_CD45neg-TCRs.xlsx")
+TIL_CD45neg_tcrs$cell.barcode <- gsub("-1", "-4", TIL_CD45neg_tcrs$cell.barcode)
+TIL_CD45neg_tcrs$origin <- "TIL_CD45neg"
+  
+TIL_CD45pos_CD3neg_tcrs <- read.xlsx("data/tcr_data/TIL_CD45pos_CD3neg-TCRs.xlsx")
+TIL_CD45pos_CD3neg_tcrs$cell.barcode <- gsub("-1", "-5", TIL_CD45pos_CD3neg_tcrs$cell.barcode)
+TIL_CD45pos_CD3neg_tcrs$origin <- "TIL_CD45pos_CD3neg"
+
+TIL_CD45pos_CD3pos_1_tcrs <- read.xlsx("data/tcr_data/TIL_CD45pos_CD3pos-1-TCRs.xlsx")
+TIL_CD45pos_CD3pos_1_tcrs$cell.barcode <- gsub("-1", "-6", TIL_CD45pos_CD3pos_1_tcrs$cell.barcode)
+TIL_CD45pos_CD3pos_1_tcrs$origin <- "TIL_CD45pos_CD3pos-1"
+
+TIL_CD45pos_CD3pos_2_tcrs <- read.xlsx("data/tcr_data/TIL_CD45pos_CD3pos-2-TCRs.xlsx")
+TIL_CD45pos_CD3pos_2_tcrs$cell.barcode <- gsub("-1", "-7", TIL_CD45pos_CD3pos_2_tcrs$cell.barcode)
+TIL_CD45pos_CD3pos_2_tcrs$origin <- "TIL_CD45pos_CD3pos-2"
+
+TIL_CD45pos_CD3pos_3_tcrs <- read.xlsx("data/tcr_data/TIL_CD45pos_CD3pos-3-TCRs.xlsx")
+TIL_CD45pos_CD3pos_3_tcrs$cell.barcode <- gsub("-1", "-8", TIL_CD45pos_CD3pos_3_tcrs$cell.barcode)
+TIL_CD45pos_CD3pos_3_tcrs$origin <- "TIL_CD45pos_CD3pos-3"
+
+# cells to exlcude
+remove <- c(PBMC_pre_CD45pos_CD3pos_tcrs$cell.barcode[PBMC_pre_CD45pos_CD3pos_tcrs$category %in% c("6.multiple")],
+            PBMC_post_CD45pos_CD3pos_tcrs$cell.barcode[PBMC_post_CD45pos_CD3pos_tcrs$category %in% c("6.multiple")],
+            PBMC_relapse_CD45pos_CD3pos_tcrs$cell.barcode[PBMC_relapse_CD45pos_CD3pos_tcrs$category %in% c("6.multiple")],
+            TIL_CD45neg_tcrs$cell.barcode[TIL_CD45neg_tcrs$category %in% c("6.multiple")],
+            TIL_CD45pos_CD3neg_tcrs$cell.barcode[TIL_CD45pos_CD3neg_tcrs$category %in% c("6.multiple")],
+            TIL_CD45pos_CD3pos_1_tcrs$cell.barcode[TIL_CD45pos_CD3pos_1_tcrs$category %in% c("6.multiple")],
+            TIL_CD45pos_CD3pos_2_tcrs$cell.barcode[TIL_CD45pos_CD3pos_2_tcrs$category %in% c("6.multiple")],
+            TIL_CD45pos_CD3pos_3_tcrs$cell.barcode[TIL_CD45pos_CD3pos_3_tcrs$category %in% c("6.multiple")])
+
+# count before removing
+count.umi.high <- table(p2@meta.data$sample)
+
+p2 = subset(p2, cells = names(Idents(p2))[!names(Idents(p2)) %in% remove]) #### CHANGED FROM SubsetData
+count.tcr <- table(p2@meta.data$sample)
+```
+
+Counting number of cells that passed the filter
+```{r count cells passing filter, eval=TRUE, echo=FALSE}
+count_stats <- data.frame(numi_10000 = data.frame(count.umi.high)$Freq,
+                         tcr = data.frame(count.tcr)$Freq,
+                         row.names = data.frame(count.tcr)$Var1)
+
+count_stats
+
+```
+
+# Normalization
+```{r normalization, eval=FALSE, echo=FALSE}
+# RNA normalization
+p2 <- NormalizeData(p2, assay = "RNA", normalization.method = "LogNormalize", scale.factor = 1e6)
+
+# ADT normalization
+p2 <- NormalizeData(p2, assay = "ADT", normalization.method = "CLR")
+```
+
+# Read in TCR clonotype matching
+```{r read in TCR clonotype matches, eval=TRUE}
+tcr.clone <- read.xlsx('matches_tils_pbmcs_7_revised.xlsx')
+```
+
+# add TCR clonotype matches to metadata
+```{r add in TCR clonotype matches}
+barcodes <- p2@meta.data[,c('nCount_RNA', 'orig.ident')]
+barcodes$cell.barcode <- rownames(barcodes)
+tcr.sub <- tcr.clone[,c('TCR.clonotype.ID.revised', 'til.clonotype.family', 'cell.barcode')];
+
+allb <- merge(barcodes, tcr.sub, by='cell.barcode', all=TRUE)
+rownames(allb) <- allb$cell.barcode
+allb <- allb[rownames(barcodes), ]
+
+p2 <- AddMetaData(p2, metadata=allb$TCR.clonotype.ID.revised, col.name="TCR.Clone")
+p2 <- AddMetaData(p2, metadata=allb$til.clonotype.family, col.name="til.clonotype.family")
+
+```
+
+
+## Normalization of different proteins in ADT dataset
+```{r ADT normalization old , warning=FALSE, message=FALSE, eval=FALSE}
+
+meta.df <- data.frame(matrix(ncol=ncol(p2@assays$ADT@data), nrow=nrow(p2@assays$ADT@data)))
+colnames(meta.df) <- colnames(p2@assays$ADT@data)
+for (cell in colnames(p2@assays$ADT@data)) {
+  isotypesmean <- mean(p2@assays$ADT@data[c("IgG1isotype-CITEseq", "IgG2aisotype-CITEseq", "IgG2bisotype-CITEseq"), cell])
+  cell.data <- p2@assays$ADT@data[,cell]
+  op1 <- as.numeric(cell.data/isotypesmean)
+  op2 <- as.numeric(cell.data+1-isotypesmean)
+  if(isotypesmean>=1) {
+    cell.norm <- op1
+  } else { cell.norm <- op2}
+  meta.df[,cell] <- cell.norm
+}
+
+rownames(meta.df) <- paste0(rownames(p2@assays$ADT@data), '.norm')
+meta.df <- data.frame(meta.df)
+for (row in rownames(meta.df)) {
+  add <- as.numeric(meta.df[row,])
+  p2 <- AddMetaData(p2, metadata = add, col.name=row)
+}
+
+# p2 <- AddMetaData(p2, metadata=t(meta.df))
+
+
+```
+
+
+# Clustering on ALL p2 data
+```{r cluster p2}
+p2 <- FindVariableFeatures(object = p2)
+p2 <- ScaleData(object = p2)
+cat("Number of variable genes", length(x = VariableFeatures(object = p2)), '\n')
+p2 <- RunPCA(object = p2, features = VariableFeatures(object = p2), verbose = FALSE)
+p2 <- RunUMAP(p2, reduction = "pca", dims = 1:50)
+p2 <- FindNeighbors(object = p2, dims = 1:50)
+p2 <- FindClusters(object = p2)
+p2$clusters <- Idents(object = p2)
+```
+
+
+# Remove contaminant clusters and cells
+```{r remove contaminant clusters}
+cells.TrueT <- rownames(p2@meta.data)[p2@meta.data$clusters %in% c(0,1,2,3,5,6,7,8,9,10,11,13,14,15,16,17,18,22,26,28)]
+
+p2.TrueT <- subset(p2, cells = cells.TrueT)
+
+umaps <- data.frame(p2.TrueT@reductions$umap@cell.embeddings)
+want <- umaps %>% subset((UMAP_1 < 5 & UMAP_1 > -7 & UMAP_2 < 7) | (UMAP_2 < 4 & UMAP_1 > 4))
+cells.TrueT <- rownames(want)
+TrueT <- subset(p2.TrueT, cells=cells.TrueT)
+
+# create object with contaminants removed 
+Idents(object = TrueT) <- TrueT@meta.data$sample
+cells = names(Idents(TrueT))[Idents(TrueT) %in% c("TIL_CD45pos_CD3pos-1", "TIL_CD45pos_CD3pos-2", "TIL_CD45pos_CD3pos-3", "PBMC_relapse_CD45pos_CD3pos", "PBMC_post_CD45pos_CD3pos", "PBMC_pre_CD45pos_CD3pos")]
+data_adt <- TrueT@meta.data[cells, ]
+true_t_cells_adt <- rownames(data_adt)[data_adt[,"CD19.CITEseq.norm"] < 1.8 & data_adt[,'CD11b.CITEseq.norm'] < 2]
+data_rna <- TrueT@assays$RNA@data[,cells]
+true_t_cells_rna <- colnames(data_rna)[data_rna["ITGAM", ] < 3.5 & data_rna['CD19', ] < 3.5]
+true_t_cells <- intersect(true_t_cells_adt, true_t_cells_rna)
+
+
+trueT <- subset(TrueT, cells = true_t_cells)
+trueT <- NormalizeData(trueT, assay = "RNA", normalization.method = "LogNormalize", scale.factor = 1e6)
+```
+
+
+
+# CD4-CD8-DN-DP classification
+```{r identify T lymphocytes, eval=TRUE, echo=TRUE}
+# pbmc pre
+cells <- names(Idents(trueT))[Idents(trueT) == "PBMC_pre_CD45pos_CD3pos"]
+data <- trueT@meta.data[cells, ]
+pbmc.pre.cd8 <- rownames(data)[data[, "CD8a.CITEseq.norm"] >= 1.1 & data[,"CD4.CITEseq.norm"] <= 1.1]
+pbmc.pre.cd4 <- rownames(data)[data[, "CD8a.CITEseq.norm"] <= 1.3 & data[, "CD4.CITEseq.norm"] > 1.1]
+pbmc.pre.dp <- rownames(data)[data[, "CD8a.CITEseq.norm"] > 1.1 & data[, "CD4.CITEseq.norm"] > 1.1]
+pbmc.pre.dn <- rownames(data)[data[, "CD8a.CITEseq.norm"] < 1.3 & data[, "CD4.CITEseq.norm"] <= 1.1]
+
+# pbmc post
+cells <- names(Idents(trueT))[Idents(trueT) == "PBMC_post_CD45pos_CD3pos"]
+data <- trueT@meta.data[cells, ]
+pbmc.post.cd8 <- rownames(data)[data[, "CD8a.CITEseq.norm"] >= 0.8 & data[, "CD4.CITEseq.norm"] <= 1.3]
+pbmc.post.cd4 <- rownames(data)[data[, "CD8a.CITEseq.norm"] <= 1.4 & data[, "CD4.CITEseq.norm"] > 1]
+pbmc.post.dp <- rownames(data)[data[, "CD8a.CITEseq.norm"] >= 1.4 & data[, "CD4.CITEseq.norm"] > 1.3]
+pbmc.post.dn <- rownames(data)[data[, "CD8a.CITEseq.norm"] < 0.8 & data[, "CD4.CITEseq.norm"] < 1]
+
+# pbmc relapse
+cells <- names(Idents(trueT))[Idents(trueT) == "PBMC_relapse_CD45pos_CD3pos"]
+data <- trueT@meta.data[cells, ]
+pbmc.relapse.cd8 <- rownames(data)[data[, "CD8a.CITEseq.norm"] >= 0.8 & data[, "CD4.CITEseq.norm"] <= 1.1]
+pbmc.relapse.cd4 <- rownames(data)[data[, "CD8a.CITEseq.norm"] <= 1.3 & data[, "CD4.CITEseq.norm"] > 0.9]
+pbmc.relapse.dp <- rownames(data)[data[, "CD8a.CITEseq.norm"] > 1.3 & data[, "CD4.CITEseq.norm"] > 1.1]
+pbmc.relapse.dn <- rownames(data)[data[, "CD8a.CITEseq.norm"] < 0.8 & data[, "CD4.CITEseq.norm"] < 0.9]
+
+# TILs
+cells = names(Idents(trueT))[Idents(trueT) %in% c("TIL_CD45pos_CD3pos-1", "TIL_CD45pos_CD3pos-2", "TIL_CD45pos_CD3pos-3")]
+data <- trueT@meta.data[cells, ]
+tils.cd8 <- rownames(data)[data[, "CD8a.CITEseq.norm"] >= 0.9 & data[, "CD4.CITEseq.norm"] <= 1.2]
+tils.cd4 <- rownames(data)[data[, "CD8a.CITEseq.norm"] <= 1.5 & data[, "CD4.CITEseq.norm"] > 1]
+tils.dp <- rownames(data)[data[, "CD8a.CITEseq.norm"] > 1.5 & data[, "CD4.CITEseq.norm"] > 1.2]
+tils.dn <- rownames(data)[data[, "CD8a.CITEseq.norm"] < 0.9 & data[, "CD4.CITEseq.norm"] < 1]
+
+# all together
+cd8.adt <- c(pbmc.pre.cd8, pbmc.post.cd8, pbmc.relapse.cd8, tils.cd8)
+cd4.adt <- c(pbmc.pre.cd4, pbmc.post.cd4, pbmc.relapse.cd4, tils.cd4)
+dp.adt <- c(pbmc.pre.dp, pbmc.post.dp, pbmc.relapse.dp, tils.dp)
+dn.adt <- c(pbmc.pre.dn, pbmc.post.dn, pbmc.relapse.dn, tils.dn)
+
+dn.adt <- dn.adt[!(dn.adt %in% cd8.adt | dn.adt %in% cd4.adt)]
+dp.adt <- dp.adt[!(dp.adt %in% cd8.adt | dp.adt %in% cd4.adt)]
+
+d = trueT@meta.data
+d$cd8.adt = ifelse(rownames(d) %in% cd8.adt, 1, 0)
+d$cd4.adt = ifelse(rownames(d) %in% cd4.adt, 1, 0)
+d$dp.adt = ifelse(rownames(d) %in% dp.adt, 1, 0)
+d$dn.adt = ifelse(rownames(d) %in% dn.adt, 1, 0)
+
+trueT = AddMetaData(trueT, metadata=d$cd8.adt, col.name='cd8.adt')
+trueT = AddMetaData(trueT, metadata=d$cd4.adt, col.name='cd4.adt')
+trueT = AddMetaData(trueT, metadata=d$dp.adt, col.name='dp.adt')
+trueT = AddMetaData(trueT, metadata=d$dn.adt, col.name='dn.adt')
+
+cd8.rna <- colnames(trueT@assays$RNA@data)[trueT@assays$RNA@data["CD8A",] >= 3]
+cd4.rna <- colnames(trueT@assays$RNA@data)[trueT@assays$RNA@data["CD4",] >= 3]
+
+nums <- c(length(cd8.adt), length(cd4.adt), length(dp.adt), length(dn.adt))
+names(nums) <- c("CD8, ADT", "CD4, ADT", "DP, ADT", "DN, ADT")
+
+
+```
+
+
+# Performing linear dimensionality reduction (PCA) and Cluster analysis
+```{r PCA and Processing}
+# running PCA
+trueT <- FindVariableFeatures(object = trueT)
+cat("Number of variable genes", length(x = VariableFeatures(object = trueT)), '\n')
+trueT <- ScaleData(object = trueT)
+trueT <- RunPCA(object = trueT, features = VariableFeatures(object = trueT), verbose = FALSE)
+num.pc.to.use <- 50
+trueT <- RunUMAP(trueT, reduction = "pca", dims = 1:num.pc.to.use)
+trueT <- FindNeighbors(object = trueT, dims = 1:num.pc.to.use)
+trueT <- FindClusters(object = trueT, resolution = 0.50)
+trueT$clusters <- Idents(object = trueT)
+
+```
+
+
+# Just TILS
+```{r subset out tils}
+
+til.cells <- rownames(trueT@meta.data)[trueT@meta.data$sample %in% c("TIL_CD45pos_CD3pos-1", "TIL_CD45pos_CD3pos-2", "TIL_CD45pos_CD3pos-3")]; length(til.cells)
+tils <- subset(trueT, cells = til.cells)
+tils <- NormalizeData(tils, assay = "RNA", normalization.method = "LogNormalize", scale.factor = 1e6)
+
+```
+
+# cluster on the TILS, we chose Res 0.4
+```{r}
+tils <- FindVariableFeatures(object = tils)
+tils <- ScaleData(tils, features = rownames(tils))
+tils <- RunPCA(object = tils, features = VariableFeatures(object = tils), verbose = FALSE)
+tils <- RunUMAP(tils, reduction = "pca", dims = 1:50)
+tils <- FindNeighbors(object = tils, dims = 1:50)
+tils <- FindClusters(object = tils, resolution=0.4)
+tils$clusters <- Idents(object = tils)
+```
+
+# Just CD8 TILS
+```{r subset out cd8 tils}
+cells <- rownames(tils@meta.data)[tils@meta.data$cd8.adt==1]; length(cells)
+TIL.CD8 <- subset(tils, cells = cells)
+TIL.CD8 <- NormalizeData(TIL.CD8, assay = "RNA", normalization.method = "LogNormalize", scale.factor = 1e6)
+```
+
+# cluster on the CD8 TILS, we chose Res 0.4
+```{r}
+TIL.CD8 <- ScaleData(TIL.CD8, features = rownames(TIL.CD8))
+TIL.CD8 <- FindVariableFeatures(object = TIL.CD8)
+TIL.CD8 <- RunPCA(object = TIL.CD8, features = VariableFeatures(object = TIL.CD8), verbose = FALSE)
+TIL.CD8 <- RunUMAP(TIL.CD8, reduction = "pca", dims = 1:50)
+TIL.CD8 <- FindNeighbors(object = TIL.CD8, dims = 1:50)
+TIL.CD8 <- FindClusters(object = TIL.CD8, resolution = 0.40)
+TIL.CD8$clusters <- Idents(object = TIL.CD8)
+```
+
+
+# Find markers for each cluster
+```{r top til.cd8 markers, eval=F, echo=F}
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+til.cd8.markers <- FindAllMarkers(TIL.CD8, min.pct = 0.25, logfc.threshold = log(2))
+top_10 <- til.cd8.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC)
+top20 <- til.cd8.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_logFC)
+```
+
+#Get table clonotype distribution within clusters 
+```{r echo=FALSE, eval=FALSE}
+tcr.clone <- read.xlsx('matches_tils_pbmcs_7_revised.xlsx')
+g.table <- TIL.CD8@meta.data[,c('orig.ident', 'sample', 'TCR.Clone', 'til.clonotype.family', 'clusters')]
+g.table$cell.barcode <- rownames(TIL.CD8@meta.data)
+rownames(g.table) <- rownames(TIL.CD8@meta.data)
+
+g.table <- merge(g.table, tcr.clone[,c('cell.barcode', 'clone', 'til.counts')], by='cell.barcode', all.x=TRUE); 
+
+wb <- createWorkbook()
+name <- "TCR clones"
+addWorksheet(wb, name)
+writeData(wb, sheet = name, g.table)
+
+saveWorkbook(wb, file = 'R_output/p2.TIL.CD8.clonotype.cluster.spreadsheet.xlsx', overwrite = TRUE)
+```
+
+
+

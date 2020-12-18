@@ -1,0 +1,337 @@
+---
+title: "Sade Feldman Analysis"
+author: "Kari Stromhaug"
+date: "11/6/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(Seurat)
+library(tidyverse)
+library(splitstackshape)
+library(openxlsx)
+library(reshape2)
+library(pheatmap)
+source('~/Documents/source_code/seurat_functions.R')
+
+setwd('~/Dropbox (Partners HealthCare)/Melanoma P2 Analysis/Sade-Feldman/')
+
+```
+
+```{r heatmap function, message=F}
+MakeHeatmapTable <- function(obj, internal_label, external_label) {
+  temp = data.frame(table(obj@meta.data[,c(internal_label, external_label)]))
+  temp = dcast(temp, paste0(internal_label, ' ~ ', external_label))
+
+  rownames(temp) <- temp[,internal_label]
+  temp[,internal_label]<-NULL
+
+  temp.t = t(temp)
+  temp.tp = temp.t
+  
+  for (i in 1:nrow(temp.tp)) {
+    temp.tp[i,] <- temp.tp[i,] / sum(temp.tp[i,]) * 100
+  }
+  for (i in 1:ncol(temp.tp)) {
+    temp.tp[,i] <- temp.tp[,i] / sum(temp.tp[,i]) * 100
+  }
+  
+  return(temp.tp)
+}
+
+```
+
+
+```{r majclust}
+AddMajorityCluster <- function(obj, cluster_name) {
+  show('ADDING MAJORITY CLUSTER')
+  cols = c(cluster_name, 'clonotype.family.3')
+  
+  complete.table = obj@meta.data[,cols]
+  
+  unique.clones = unique(complete.table$clonotype.family.3); cat('number of unique clones:', length(unique.clones), '\n')
+  
+  unique.clones = unique.clones[!is.na(unique.clones) & !grepl('-NA', unique.clones)]; cat('number that are not NA:', length(unique.clones), '\n')
+
+  for (clones in unique.clones) {
+    # cat('the clone is:', clones, '\n')
+    clones.sub = complete.table %>% subset(clonotype.family.3==clones)
+    # cat('dimensions of subset:', dim(clones.sub), '\n')
+    cluster.dist = table(clones.sub[,cluster_name])
+    num.clones = nrow(clones.sub)
+
+    cluster.dist <- data.frame(cluster.dist)
+    rownames(cluster.dist) <- cluster.dist[,1]
+    cluster.dist[,1] <- NULL
+
+    maj.clust = rownames(cluster.dist)[apply(cluster.dist,2,which.max)]
+    
+    mult = cluster.dist %>% subset(Freq == max(cluster.dist$Freq))
+    if (nrow(mult) == 2) {
+      maj.clust = '2.multiple'
+    } else if (nrow(mult) >= 3) {
+      maj.clust = '3.or.more'
+    }
+    # cat('majority cluster:', maj.clust, '\n')
+
+    complete.table[which(complete.table$clonotype.family.3==clones), paste0('maj.', cluster_name)] <- maj.clust
+  }
+  return(complete.table)
+}
+```
+
+```{r read dataF}
+sfs <- readRDS('s_f_seurat_unprocessed.rds')
+
+## read in protein-coding genes
+protein_genes = readRDS('~/Dropbox (Partners HealthCare)/reference_data/gene_lists/protein_coding_genes_pseudogenes_list.rds')
+
+length(intersect(protein_genes, rownames(sfs)))
+
+```
+
+
+## Seurat processing using their labels
+
+```{r process cd8, message=F}
+sfs = readRDS('s_f_seurat_unprocessed.rds')
+sfs@meta.data = sfs@meta.data[colnames(sfs),]
+Idents(sfs) <- sfs$Cell.type
+just.cd8 = subset(sfs, idents='CD8')
+
+just.cd8 = just.cd8[intersect(protein_genes, rownames(just.cd8)), ]
+
+just.cd8 <- DoSeurat(just.cd8, do_norm=F, res=0.45)
+just.cd8$clusters <- just.cd8$seurat_clusters
+# just.cd8 <- FindClusters(just.cd8, resolution =0.4)
+# ```{r cluster res, echo=F, eval=F, message=F}
+# just.cd8 <- readRDS('s_f_cd8all_res06_20200901.rds')
+
+```
+
+
+```{r resolutions, echo=F, eval=F}
+just.cd8 <- just.cd8 %>% FindClusters(res=0.35)
+just.cd8$clusters_res_0.35 <- just.cd8$seurat_clusters
+
+just.cd8 <- just.cd8 %>% FindClusters(res=0.37)
+just.cd8$clusters_res_0.37 <- just.cd8$seurat_clusters
+
+just.cd8 <- just.cd8 %>% FindClusters(res=0.40)
+just.cd8$clusters_res_0.40 <- just.cd8$seurat_clusters
+
+just.cd8 <- just.cd8 %>% FindClusters(res=0.42)
+just.cd8$clusters_res_0.42 <- just.cd8$seurat_clusters
+
+just.cd8 <- just.cd8 %>% FindClusters(res=0.45)
+just.cd8$clusters_res_0.45 <- just.cd8$seurat_clusters
+
+just.cd8 <- just.cd8 %>% FindClusters(res=0.50)
+just.cd8$clusters_res_0.50 <- just.cd8$seurat_clusters
+
+just.cd8 <- just.cd8 %>% FindClusters(res=0.60)
+just.cd8$clusters_res_0.60 <- just.cd8$seurat_clusters
+
+FeaturePlot(just.cd8, features=c('PDCD1', 'ENTPD1', 'TCF7', 'MKI67', 'IL7R'))
+
+DimPlot(just.cd8, group.by='clusters_res_0.30')
+DimPlot(just.cd8, group.by='clusters_res_0.35')
+DimPlot(just.cd8, group.by='clusters_res_0.37')
+DimPlot(just.cd8, group.by='clusters_res_0.40')
+DimPlot(just.cd8, group.by='clusters_res_0.42')
+DimPlot(just.cd8, group.by='clusters_res_0.45')
+DimPlot(just.cd8, group.by='clusters_res_0.50')
+DimPlot(just.cd8, group.by='clusters_res_0.60')
+
+
+just.cd8 <- just.cd8 %>% FindClusters(res=0.80)
+just.cd8$clusters_res_0.80 <- just.cd8$seurat_clusters
+DimPlot(just.cd8, group.by='clusters_res_0.80')
+
+just.cd8 <- just.cd8 %>% FindClusters(res=1)
+just.cd8$clusters_res_1.0 <- just.cd8$seurat_clusters
+DimPlot(just.cd8, group.by='clusters_res_1.0')
+
+just.cd8$clusters <- just.cd8$clusters_res_0.45
+```
+
+## Moshe's cluster labels
+```{r }
+# DimPlot(just.cd8, label=T)
+DimPlot(just.cd8, group.by='CD8.cluster...6.clusters')
+DimPlot(just.cd8, group.by='CD8.cluster...2.clusters')
+# FeaturePlot(just.cd8, features=c('CD3D', 'PTPRC', 'CD4', 'CD8A'))
+
+# saveRDS(just.cd8, 's_f_prelabeledcd8_processed.rds')
+
+```
+
+
+```{r add cd8 majority clusters}
+
+
+seur_majclust <- AddMajorityCluster(just.cd8, 'clusters')
+seur_majlabs <- seur_majclust$maj.clusters; names(seur_majlabs) <- rownames(seur_majclust)
+just.cd8 <- AddMetaData(just.cd8, metadata = seur_majlabs, col.name='maj.clusters')
+just.cd8$maj.clusters <- ifelse(just.cd8$clonotype.family.size==1, just.cd8$clusters, just.cd8$maj.clusters)
+
+sf_2_majclust <- AddMajorityCluster(just.cd8, 'CD8.cluster...2.clusters')
+sf_2_majlabs <- sf_2_majclust$maj.CD8.cluster...2.clusters; names(sf_2_majlabs) <- rownames(sf_2_majclust)
+just.cd8 <- AddMetaData(just.cd8, metadata = sf_2_majlabs, col.name='maj.sf_2_cluster')
+just.cd8$maj.sf_2_cluster <- ifelse(just.cd8$clonotype.family.size==1, just.cd8$CD8.cluster...2.clusters, just.cd8$maj.sf_2_cluster)
+
+sf_6_majclust <- AddMajorityCluster(just.cd8, 'CD8.cluster...6.clusters')
+sf_6_majlabs <- sf_6_majclust$maj.CD8.cluster...6.clusters; names(sf_6_majlabs) <- rownames(sf_6_majclust)
+just.cd8 <- AddMetaData(just.cd8, metadata = sf_6_majlabs, col.name='maj.sf_6_cluster')
+just.cd8$maj.sf_6_cluster <- ifelse(just.cd8$clonotype.family.size==1, just.cd8$CD8.cluster...6.clusters, just.cd8$maj.sf_6_cluster)
+
+
+saveRDS(just.cd8, 's_f_cd8_res045_20200909.rds')
+just.cd8 = readRDS('s_f_cd8_res045_20200909.rds')
+# sfs.cd8 = readRDS('s_f_cd8_res06_20200902.rds')
+# sfs.cd8.old = readRDS('s_f_cd8all_res06_20200901.rds')
+
+# colnames(sfs.cd8@meta.data)[colnames(sfs.cd8@meta.data)=='labels'] <- 'singler_labels'
+
+# singler_majclust <- AddMajorityCluster(sfs.cd8, 'singler_labels')
+# ingest_majclust <- AddMajorityCluster(sfs.cd8, 'oliveira_labels')
+
+# majclust_labels = merge(singler_majclust, ingest_majclust, by=0)[,c('Row.names', 'maj.singler_labels', 'maj.oliveira_labels')]
+# rownames(majclust_labels) <- majclust_labels$Row.names; majclust_labels$Row.names <- NULL
+# 
+# sfs.cd8 <- AddMetaData(sfs.cd8, metadata=majclust_labels)
+
+
+```
+
+
+```{r calc cd8 percent of each clone, echo=F, eval=F}
+just.cd8 = readRDS('s_f_cd8_res045_20200909.rds')
+# freqs = just.cd8@meta.data %>% subset(!is.na(Clonotype.family.number)) %>%# & 
+                              # subset(!grepl('-NA', clonotype.family.2)) 
+
+met = just.cd8@meta.data
+met$clonotype.family.size <- ifelse(met$clonotype.family.2=='P3-45', 2, met$clonotype.family.size)
+
+
+pats = unique(met$patient); pats
+newpats = met %>% subset(patient==pats[1] & grepl('-NA', clonotype.family.2))
+newpats$clonotype.family.3 = paste0(newpats$clonotype.family.2, '_', 1:nrow(newpats))
+
+for (pat in pats[2:length(pats)]) {
+  patsub = met %>% subset(patient==pat & grepl('-NA', clonotype.family.2))
+  patsub$clonotype.family.3 = paste0(patsub$clonotype.family.2, '_', 1:nrow(patsub))
+  
+  newpats <- rbind(newpats, patsub)
+}
+
+View(newpats[,c('patient', 'clonotype.family.2', 'clonotype.family.3', 'clonotype.family.size')])
+
+dim(met); dim(newpats)
+met = merge(met, newpats, all=T); dim(met)
+
+met$clonotype.family.3 <- ifelse(is.na(met$clonotype.family.3), as.character(met$clonotype.family.2), met$clonotype.family.3)
+
+# met$clonotype.family.size <- ifelse(is.na(met$clonotype.family.size), 1, met$clonotype.family.size)
+
+met$clonotype.family.size <- as.numeric(as.character(met$clonotype.family.size))
+freqs = met %>% group_by(patient, clonotype.family.size, clonotype.family.3) %>% count()
+sums = aggregate(freqs$clonotype.family.size, by=list(patient=freqs$patient), FUN=sum)
+rownames(sums) <- sums$patient
+sums$x <- as.numeric(as.character(sums$x))
+colnames(sums) <- c('patient', 'total.number.tcrs')
+show(sums)
+
+dim(sums); dim(met)
+met = merge(met, sums); dim(met)
+
+met$patient.clone.percent <- as.numeric(as.character(met$clonotype.family.size)) / as.numeric(as.character(met$total.number.tcrs)) * 100
+View(met[,c('patient', 'clonotype.family.size', 'clonotype.family.3', 'patient.clone.percent')] %>%
+       group_by(patient, clonotype.family.3, clonotype.family.size, patient.clone.percent) %>% count())
+
+
+# freqs = freqs %>% group_by(patient, clonotype.family.size, clonotype.family.2) %>% count()
+
+### CONFIRM THAT THE PERCENTS ACTUALLY ADD UP TO 100
+arena = met[is.na(met$patient.clone.percent),]; dim(arena)
+View(arena[,c('patient', 'clonotype.family.2', 'clonotype.family.3', 'clonotype.family.size')])
+sumrms <- met %>% subset(!is.na(patient.clone.percent)) %>% distinct(patient.clone.percent, clonotype.family.3, patient)
+sumrms <- aggregate(sumrms$patient.clone.percent, by=list(Categorty=(sumrms$patient)), FUN=sum)
+sumrms
+
+percents.add <- met$patient.clone.percent; names(percents.add) <- rownames(met)
+just.cd8 <- AddMetaData(just.cd8, metadata=percents.add, col.name='patient.clone.percent')
+```
+
+```{r make cd8 tables, echo=F, eval=F}
+colnames(met) <- gsub('\\.+', '\\.', colnames(met))
+
+tcr.info = c('CDR3.alpha.or.gamma.chain', 'CDR3.beta.or.delta.chain', 'CDR3.AA.alpha.or.gamma.chain','CDR3.AA.beta.or.delta.chain', 'alpha.gamma.V', 'alpha.gamma.J','beta.delta.V','beta.delta.J','beta.delta.D','TCRalpha.chain.ID','TCRbeta.chain.ID','clonotype.family.2','clonotype.family.size', 'patient.clone.percent','patient', 'maj.clusters', 'maj.sf_2_cluster', 'maj.sf_6_cluster')
+
+met.tcr = met[,tcr.info]
+met.tcr = met.tcr %>% subset(!is.na(patient.clone.percent))
+
+write.table(met.tcr, 'cells_with_tcrs_info_20200909.txt', sep='\t')
+
+met.tcr.family <- met.tcr %>% distinct(.keep_all=T)
+
+write.table(met.tcr.family, 'tcr_families_info_20200909.txt', sep='\t')
+
+```
+
+```{r update metadata in the object}
+rownames(met) <- met$Row.names
+met.update = met[,setdiff(colnames(met), colnames(just.cd8@meta.data))]
+
+just.cd8 <- AddMetaData(just.cd8, metadata=met.update)
+
+saveRDS(just.cd8, 's_f_cd8_res045_20200909.rds')
+just.cd8 = readRDS('s_f_cd8_res045_20200909.rds')
+
+scanpy.labels = read.delim('just_cd8_ingested_into_tils.txt', sep='\t')
+rownames(scanpy.labels) <- scanpy.labels$Row_names
+scanpy.add = scanpy.labels$oliveira_labels; names(scanpy.add)<-rownames(scanpy.labels)
+just.cd8 <- AddMetaData(just.cd8, metadata=scanpy.add, col.name='oliveira_labels')
+
+oli_majclust <- AddMajorityCluster(just.cd8, 'oliveira_labels')
+oli_majlabs <- oli_majclust$maj.oliveira_labels; names(oli_majlabs) <- rownames(oli_majclust)
+just.cd8 <- AddMetaData(just.cd8, metadata = oli_majlabs, col.name='maj.oliveira_labels')
+just.cd8$maj.oliveira_labels <- ifelse(just.cd8$clonotype.family.size==1, just.cd8$oliveira_labels, just.cd8$maj.oliveira_labels)
+
+saveRDS(just.cd8, 's_f_cd8_res045_20200909.rds')
+
+singler.labels = read.delim('sf_tilsscored_singler_20200910.txt', sep='\t')
+singler.add = singler.labels[,c('labels', 'pruned.labels')]; colnames(singler.add) <- paste0('singler.', colnames(singler.add))
+just.cd8 <- AddMetaData(just.cd8, metadata=singler.add)
+fingler.majclust <- AddMajorityCluster(just.cd8, 'singler.labels')
+singler_majlabs <- fingler.majclust$maj.singler.labels; names(singler_majlabs) <- rownames(fingler.majclust)
+just.cd8 <- AddMetaData(just.cd8, metadata = singler_majlabs, col.name='maj.singler_labels')
+just.cd8$maj.singler_labels <- ifelse(just.cd8$clonotype.family.size==1, just.cd8$singler.labels, just.cd8$maj.singler_labels)
+
+DimPlot(just.cd8, group.by='singler.labels')
+saveRDS(just.cd8, 's_f_cd8_res045_20200909.rds')
+
+```
+
+```{r save data for scanpy}
+require(loomR)
+just.cd8@meta.data[] <- lapply(just.cd8@meta.data, as.character)
+just.cd8@meta.data[is.na(just.cd8@meta.data)] <- ''
+just.cd8@meta.data <- just.cd8@meta.data[,c('Row.names', 'orig.ident', 'nCount_RNA', 'nFeature_RNA', 'patient', 'Sample.name', 'title')]
+
+just.cd8.loom = as.loom(just.cd8, filename='just_cd8.loom')
+just.cd8.loom$close_all()
+
+just.cd8.meta = just.cd8@meta.data
+write.table(just.cd8.meta, 's_f_cd8_res045_20200909_metadata.txt', sep='\t')
+
+write.table(data.frame('var_genes'=just.cd8@assays$RNA@var.features), 'just_cd8_var_genes.txt', sep='\t')
+
+
+require(Matrix)
+writeMM(t(just.cd8@assays$RNA@counts), 'just_cd8_counts.mtx')
+writeMM(just.cd8@graphs$RNA_snn, 'just_cd8_snn_neighbors.mtx')
+writeMM(just.cd8@graphs$RNA_nn, 'just_cd8_nn_neighbors.mtx')
+
+```
+
