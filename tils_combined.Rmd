@@ -430,6 +430,80 @@ plot_grid(d15,d14, d15)
 
 ```
 
+#### Finding markers and making heatmaps
+```{r find markers genes for each cluster, paged.print=TRUE,fig.height=3, fig.width=8}
+tils = readRDS('~/Dropbox (Partners HealthCare)/Melanoma P2 Analysis/tils_combined/Seurat_Objects/tils.CD8.R0.6.harmonized.20200422.rds')
+
+markers <- FindAllMarkers(tils)
+
+
+## find the top genes for each cluster
+top.genes <- markers %>% group_by(cluster) %>% top_n(50, wt=avg_logFC)
+
+## changed out CD45RA and CD45RO with PTPRC
+genes <- c('CD4','CD3E','CD8A',
+           'SELL','CCR7','IL7R','CD28','PTPRC','FAS','CD27','ITGAE',
+           'PDCD1','TIGIT','HAVCR2','LAG3','CTLA4','VTCN1','CD244','KLRG1','TNFRSF14','BTLA',
+           'ENTPD1','CD69','IL2RA','ICOS','TNFRSF4','TNFRSF9','HLA-DRA',
+           'GZMA','GZMB','GZMH','GZMK','GZMM','PRF1','IFNG','FASLG','TNF',
+           'TCF7','EOMES','TBX21','PRDM1','TOX','ZNF683','FOXP3','NR4A1','MKI67',
+           'TRGV9','TRDV2','KLRB1','KLRC3')
+
+exp <- tils@assays$RNA@data[genes,]
+sc <- tils@assays$RNA@scale.data[intersect(genes, rownames(tils@assays$RNA@scale.data)),]
+tils@meta.data$cell.barcode <- rownames(tils@meta.data)
+exp.t <- t(as.matrix(exp))
+exp.t <- cbind(tils@meta.data[,c('cell.barcode','seurat_clusters','patient')], exp.t)
+exp.tm <- melt(exp.t, value.name='expression')
+
+sc.t <- t(sc)
+sc.t <- cbind(tils@meta.data[,c('cell.barcode','seurat_clusters','patient')], sc.t)
+sc.tm <- melt(sc.t, value.name='expression')
+
+exp.cl0 <- exp.tm %>% subset(seurat_clusters==0); dim(exp.cl0)
+ggplot(exp.cl0) + geom_boxplot(aes(x=variable, y=expression)) + theme(axis.text.x = element_text(angle = 90))
+
+ggplot(exp.tm) + geom_violin(aes(x=variable, y=expression)) + theme(axis.text.x = element_text(angle = 90)) + facet_grid(rows='seurat_clusters')
+
+### becaue of the outliers, removing the 5% highest and 5% lowest cells for each category
+exp.f <- data.frame()
+for (i in 0:13) {
+  sub <- sc.tm %>% subset(seurat_clusters == i)
+  sub <- sub[order(sub$expression), ]
+  fivep <- nrow(sub) * 0.05
+  print(dim(sub))
+  sub <- sub[fivep:(nrow(sub)-fivep), ]
+  print(dim(sub))
+  exp.f <- rbind(exp.f, sub)
+  cat('\n')
+}
+
+exp.sd <- data.frame()
+for (i in 0:13) {
+  sub <- sc.tm %>% subset(seurat_clusters == i)
+  sub <- sub[order(sub$expression), ]
+  mn <- mean(sub$expression)
+  std <- 2*sd(sub$expression)
+  print(dim(sub))
+  sub <- sub %>% subset(expression < (mn+std) & expression > (mn-std))
+  print(dim(sub))
+  exp.sd <- rbind(exp.sd, sub)
+  cat('\n')
+}
+
+ggplot(exp.f) + geom_violin(aes(x=variable, y=expression)) + theme(axis.text.x = element_text(angle = 90)) + facet_grid(rows='seurat_clusters')
+
+ggplot(exp.sd) + geom_violin(aes(x=variable, y=expression)) + theme(axis.text.x = element_text(angle = 90)) + facet_grid(rows='seurat_clusters')
+
+ss <- exp.sd %>% subset(seurat_clusters %in% c(0,1,3))
+ggplot(ss) + geom_violin(aes(x=variable, y=expression)) + theme(axis.text.x = element_text(angle = 90)) + facet_grid(rows='seurat_clusters')
+
+require(ggplot2)
+
+```
+
+
+
 
 #### DGE testing in the tils.CD8.harmony population 
 ```{r de testing tils.CD8.harmony, paged.print=TRUE,fig.height=3, fig.width=8}
@@ -556,6 +630,8 @@ cluster_scores = aggregate(scores, list(scores$seurat_clusters), mean)
 ## mitosis: cluster 5 has a high score (2.99)
 
 ```
+
+
 
 ```{r save matrix file}
 tils.CD8.harmony = readRDS('Seurat_Objects/tils.CD8.R0.6.harmonized.20200422.rds')
